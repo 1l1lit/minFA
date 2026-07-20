@@ -27,12 +27,9 @@ public:
         k0 = static_cast<uint32_t>(k & 0xffffffff);
         k1 = static_cast<uint32_t>(k >> 32);
 
-        pipe.InitBuffer(tB, 8 * SIZE);
-        t = tB.GetWithOffset<uint32_t>(4 * N, 0);
-        t0 = tB.GetWithOffset<uint32_t>(N, 4 * SIZE);
-        t1 = tB.GetWithOffset<uint32_t>(N, 5 * SIZE);
-        t2 = tB.GetWithOffset<uint32_t>(N, 6 * SIZE);
-        t3 = tB.GetWithOffset<uint32_t>(N, 7 * SIZE);
+        pipe.InitBuffer(tB, 2 * SIZE);
+        t4 = tB.GetWithOffset<uint32_t>(N, 0);
+        t5 = tB.GetWithOffset<uint32_t>(N, SIZE);
     }
 
     __aicore__ inline void Main()
@@ -43,48 +40,33 @@ public:
     }
 
 private:
-    __aicore__ inline void swap(int i)
-    {
-        if (i & 1) {
-            c0 = c[0];
-            c1 = c[N];
-            c2 = c[2 * N];
-            c3 = c[3 * N];
-
-            b0 = t[0];
-            b1 = t[N];
-            b2 = t[2 * N];
-            b3 = t[3 * N];
-        } else {
-            c0 = t[0];
-            c1 = t[N];
-            c2 = t[2 * N];
-            c3 = t[3 * N];
-
-            b0 = c[0];
-            b1 = c[N];
-            b2 = c[2 * N];
-            b3 = c[3 * N];
-        }
-    }
-
     __aicore__ inline void gather()
     {
-        swap(0);
+        c0 = o[0];
+        c1 = o[N];
+        c2 = o[2 * N];
+        c3 = o[3 * N];
+
         uint64_t rsvdCnt = 0;
         GatherMask(c0, c, 3, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
         GatherMask(c1, c, 4, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
         GatherMask(c2, c, 5, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
         GatherMask(c3, c, 6, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
+
+        t0 = c[0];
+        t1 = c[N];
+        t2 = c[2 * N];
+        t3 = c[3 * N];
     }
 
     __aicore__ inline void scatter()
     {
-        uint64_t addr[16];
+        uint64_t dst[16], src[16];
         for (int i = 0; i < 16; i++) {
-            addr[i] = c[8 * i].GetPhyAddr();
+            dst[i] = c[8 * i].GetPhyAddr();
+            src[i] = o[8 * i].GetPhyAddr();
         }
-        TransDataTo5HD<uint32_t>(addr, addr, {false, false, 1, 0, 0});
+        TransDataTo5HD<uint32_t>(dst, src, {false, false, 1, 0, 0});
 
         uint64_t rsvdCnt = 0;
         GatherMask(o[0], c, 3, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
@@ -108,7 +90,7 @@ private:
 
     __aicore__ inline void Mask16(const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src, uint32_t n)
     {
-        Duplicate(dst, 0xffffu, 2 * n); // dst 与 src 不能重叠
+        Duplicate(dst, 0xffffu, n); // dst 与 src 不能重叠
         PipeBarrier<PIPE_V>();
         And(dst.AsU16(), dst.AsU16(), src.AsU16(), 2 * n);
     }
@@ -116,9 +98,9 @@ private:
     __aicore__ inline void mulhilo32(
         const LocalTensor<uint32_t>& h, const LocalTensor<uint32_t>& l, const LocalTensor<uint32_t>& x, uint32_t a)
     {
-        Mask16(l, x, N); // l = xl = x & 0xffff
-        PipeBarrier<PIPE_V>();
+        Mask16(l, x, N);          // l = xl = x & 0xffff
         ShiftRight(h, x, 16u, N); // h = x = x >> 16
+        PipeBarrier<PIPE_V>();
         uint32_t al = a & 0xffff;
         a = a >> 16;
 
@@ -128,74 +110,55 @@ private:
         Muls(l.AsI32(), l.AsI32(), static_cast<int32_t>(al), N); // l = m0 = xl * al
         Muls(h.AsI32(), h.AsI32(), static_cast<int32_t>(a), N);  // h = m3 = x * a
 
-        Mask16(t2, t0, N); // t2 = m1l = m1 & 0xffff
-        Mask16(t3, t1, N); // t3 = m2l = m2 & 0xffff
+        Mask16(x, t0, N); // x = m1l = m1 & 0xffff
         PipeBarrier<PIPE_V>();
         ShiftRight(t0, t0, 16u, N); // t0 = m1 = m1 >> 16
-        ShiftRight(t1, t1, 16u, N); // t1 = m2 = m2 >> 16
+        PipeBarrier<PIPE_V>();
+        Add(h.AsI32(), h.AsI32(), t0.AsI32(), N); // h = m3 + m1
 
-        Add(t2.AsI32(), t2.AsI32(), t3.AsI32(), N); // t2 = m12l = m1l + m2l
+        Mask16(t0, t1, N); // t0 = m2l = m2 & 0xffff
         PipeBarrier<PIPE_V>();
-        Mask16(t3, t2, N); // t3 = mml = m12l & 0xffff
+        ShiftRight(t1, t1, 16u, N);               // t1 = m2 = m2 >> 16
+        Add(x.AsI32(), x.AsI32(), t0.AsI32(), N); // x = mm = m1l + m2l
         PipeBarrier<PIPE_V>();
-        ShiftRight(t2, t2, 16u, N); // t2 = mmlc = m12l >> 16
+        Add(h.AsI32(), h.AsI32(), t1.AsI32(), N); // h += m2
 
-        Add(t0.AsI32(), t0.AsI32(), t1.AsI32(), N);
+        Mask16(t0, l, N); // t0 = m0l = m0 & 0xffff
         PipeBarrier<PIPE_V>();
-        Add(t0.AsI32(), t0.AsI32(), t2.AsI32(), N); // t0 = m12 = m1 + m2 + mmlc
+        ShiftRight(l, l, 16u, N); // l = m0 = m0 >> 16
         PipeBarrier<PIPE_V>();
-        Mask16(t1, t0, N); // t1 = mm = m12 & 0xffff
+        Add(x.AsI32(), x.AsI32(), l.AsI32(), N); // x = mm += m0
         PipeBarrier<PIPE_V>();
-        ShiftRight(t0, t0, 16u, N); // t0 = mmc = m12 >> 16
-
-        Add(h.AsI32(), h.AsI32(), t1.AsI32(), N); // h = m3 + mm
+        ShiftLeft(l, x, 16u, N);   // l = mml = mm << 16
+        ShiftRight(t1, x, 16u, N); // t1 = mm = mm >> 16
         PipeBarrier<PIPE_V>();
-        Mask16(t1, l, N); // t1 = ll = m0 & 0xffff
-        PipeBarrier<PIPE_V>();
-        ShiftRight(l, l, 16u, N);
-        PipeBarrier<PIPE_V>();
-        Add(l.AsI32(), l.AsI32(), t3.AsI32(), N); // l = lh = (m0 >> 16) + mml
-        PipeBarrier<PIPE_V>();
-        ShiftRight(t3, l, 16u, N); // t3 = lc = lh >> 16
-
-        Mask16(t2, l, N);
-        PipeBarrier<PIPE_V>();
-        ShiftLeft(l, t2, 16u, N);
-        PipeBarrier<PIPE_V>();
-        Or(l.AsU16(), l.AsU16(), t1.AsU16(), 2 * N); // l = ((lh & 0xffff) << 16) | ll
-
-        ShiftLeft(t0, t0, 16u, N);
-        PipeBarrier<PIPE_V>();
-        Add(h.AsI32(), h.AsI32(), t0.AsI32(), N);
-        PipeBarrier<PIPE_V>();
-        Add(h.AsI32(), h.AsI32(), t3.AsI32(), N); // h = m3 + mm + (mmc << 16) + lc
+        Or(l.AsU16(), t0.AsU16(), l.AsU16(), 2 * N); // t0 = l = mml | m0l
+        Add(h.AsI32(), h.AsI32(), t1.AsI32(), N);    // h += mm
     }
 
     __aicore__ inline void philox_single_round()
     {
-        mulhilo32(b2, b3, c0, 0xd2511f53); // b2 = h0, b3 = l0
-        mulhilo32(b0, b1, c2, 0xcd9e8d57); // b0 = h1, b1 = l1
+        Duplicate(t0, k0, N);
+        Duplicate(t1, k1, N);
         PipeBarrier<PIPE_V>();
+        Xor(t2, t0, c1, N); // t2 = c1 ^ k0
+        Xor(t3, t1, c3, N); // t3 = c3 ^ k1
 
-        Xor(t0, c1, b0, N);
-        Duplicate(t1, k0, N);
+        mulhilo32(t4, c3, c0, 0xd2511f53); // t4 = h0, c3 = l0
+        mulhilo32(t5, c1, c2, 0xcd9e8d57); // t5 = h1, c1 = l1
         PipeBarrier<PIPE_V>();
-        Xor(b0, t0, t1, N); // b0 = h1 ^ c1 ^ k0
-
-        Xor(t2, c3, b2, N);
-        Duplicate(t3, k1, N);
-        PipeBarrier<PIPE_V>();
-        Xor(b2, t2, t3, N); // b2 = h0 ^ c3 ^ k1
+        Xor(c2, t3, t4, N); // c2 = h0 ^ c3 ^ k1
+        Xor(c0, t2, t5, N); // c0 = h1 ^ c1 ^ k0
     }
 
     __aicore__ inline void philox()
     {
-        // for (int i = 0; i < 6; i++, swap(i)) {
-        //     philox_single_round();
-        //     PipeBarrier<PIPE_V>();
-        //     k0 += 0x9e3779b9;
-        //     k1 += 0xbb67ae85;
-        // }
+        for (int i = 0; i < 6; i++) {
+            philox_single_round();
+            PipeBarrier<PIPE_V>();
+            k0 += 0x9e3779b9;
+            k1 += 0xbb67ae85;
+        }
         philox_single_round();
         PipeBarrier<PIPE_V>();
     }
@@ -234,12 +197,11 @@ private:
     TQue<TPosition::VECOUT, 1> oQ;
     TBuf<TPosition::VECCALC> tB;
 
-    LocalTensor<uint32_t> c, o, t;
+    LocalTensor<uint32_t> c, o;
     uint32_t k0, k1;
 
     LocalTensor<uint32_t> c0, c1, c2, c3;
-    LocalTensor<uint32_t> b0, b1, b2, b3;
-    LocalTensor<uint32_t> t0, t1, t2, t3;
+    LocalTensor<uint32_t> t0, t1, t2, t3, t4, t5;
 
     GlobalTensor<uint32_t> g_c, g_k, g_o;
 };
@@ -296,18 +258,18 @@ std::vector<uint32_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
         uint32_t& c3 = c[4 * b + 3];
         uint32_t k0 = k & 0xffffffff;
         uint32_t k1 = k >> 32;
-        // for (int i = 0; i < 6; i++) {
-        //     uint64_t p0 = static_cast<uint64_t>(c0) * 0xd2511f53;
-        //     uint64_t p1 = static_cast<uint64_t>(c2) * 0xcd9e8d57;
-        //     uint32_t h0 = p0 >> 32, l0 = p0 & 0xffffffff;
-        //     uint32_t h1 = p1 >> 32, l1 = p1 & 0xffffffff;
-        //     c0 = h1 ^ c1 ^ k0;
-        //     c1 = l1;
-        //     c2 = h0 ^ c3 ^ k1;
-        //     c3 = l0;
-        //     k0 += 0x9e3779b9;
-        //     k1 += 0xbb67ae85;
-        // }
+        for (int i = 0; i < 6; i++) {
+            uint64_t p0 = static_cast<uint64_t>(c0) * 0xd2511f53;
+            uint64_t p1 = static_cast<uint64_t>(c2) * 0xcd9e8d57;
+            uint32_t h0 = p0 >> 32, l0 = p0 & 0xffffffff;
+            uint32_t h1 = p1 >> 32, l1 = p1 & 0xffffffff;
+            c0 = h1 ^ c1 ^ k0;
+            c1 = l1;
+            c2 = h0 ^ c3 ^ k1;
+            c3 = l0;
+            k0 += 0x9e3779b9;
+            k1 += 0xbb67ae85;
+        }
         uint64_t p0 = static_cast<uint64_t>(c0) * 0xd2511f53;
         uint64_t p1 = static_cast<uint64_t>(c2) * 0xcd9e8d57;
         uint32_t h0 = p0 >> 32, l0 = p0 & 0xffffffff;
