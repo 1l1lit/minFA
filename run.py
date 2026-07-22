@@ -2,6 +2,7 @@ import sys
 import argparse
 import torch
 import torch_npu
+torch_npu.npu.set_device(5)
 from flash_attn_npu_v3 import flash_attn_with_kvcache
 
 

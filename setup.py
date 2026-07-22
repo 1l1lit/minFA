@@ -79,13 +79,14 @@ class BishengBuildExt(build_ext):
 
         compile_cmd = [
             "bisheng",
-            "-O2",
+            "-O0",
             "-x", "asc",
             "--npu-arch=dav-2201",
             *(["--cce-auto-infer-kernel-type=false"] if parse(torch_npu.utils.get_cann_version()) >= parse("9.0.0") else []),
             "-shared",
             "-fPIC",
             "-std=c++17",
+            "-g3",
             abi_flag,
             *[f"-I{p}" for p in asc_include_paths],
             f"-I{python_include}",
