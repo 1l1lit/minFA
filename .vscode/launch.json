@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "type": "msdebug-mi",
+            "request": "launch",
+            "name": "FA",
+            "target": "/data0/douzh/venv/bin/python",
+            "targetArgs": [
+                "run.py"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "Kill lldb",
+        },
+        {
+            "type": "msdebug-mi",
+            "request": "launch",
+            "name": "Philox",
+            "target": "build/philox",
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "Kill lldb",
+        }
+    ]
+}
