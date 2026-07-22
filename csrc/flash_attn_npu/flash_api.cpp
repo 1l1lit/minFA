@@ -311,7 +311,7 @@ std::vector<at::Tensor> mha_fwd(
     return {out, softmaxlse, out_accum, softmax_lse_accum};
 }
 
-PYBIND11_MODULE(flash_attn_npu_3, m)
+PYBIND11_MODULE(flash_attn, m)
 {
     m.doc() = "FlashAttention";
     m.def("fwd", &mha_fwd, "Forward pass, with KV-cache");

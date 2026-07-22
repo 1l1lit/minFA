@@ -8,7 +8,7 @@ import torch.nn as nn
 
 # isort: off
 # We need to import the kernels after importing torch
-import flash_attn_npu_3 # Registers operators with PyTorch
+import flash_attn # Registers operators with PyTorch
 
 # isort: on
 
@@ -60,7 +60,7 @@ def round_up_headdim(head_size: int) -> int:
     return 256
 
 
-@_torch_custom_op_wrapper("flash_attn_npu_3::_flash_attn_forward", mutates_args=(), device_types="npu")
+@_torch_custom_op_wrapper("flash_attn::_flash_attn_forward", mutates_args=(), device_types="npu")
 def _flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -108,7 +108,7 @@ def _flash_attn_forward(
     ]
     rotary_cos, rotary_sin = [maybe_contiguous(x) for x in (rotary_cos, rotary_sin)]
     seqlens_rotary = maybe_contiguous(seqlens_rotary)
-    out, softmax_lse, out_accum, softmax_lse_accum = flash_attn_npu_3.fwd(
+    out, softmax_lse, out_accum, softmax_lse_accum = flash_attn.fwd(
         q,
         k,
         v,
@@ -154,7 +154,7 @@ def _flash_attn_forward(
     return out, softmax_lse, out_accum, softmax_lse_accum
 
 
-@_torch_register_fake_wrapper("flash_attn_npu_3::_flash_attn_forward")
+@_torch_register_fake_wrapper("flash_attn::_flash_attn_forward")
 def _flash_attn_forward_fake(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -259,7 +259,7 @@ def _flash_attn_forward_fake(
     return out, softmax_lse, out_accum, softmax_lse_accum
 
 
-@_torch_custom_op_wrapper("flash_attn_npu_3::_flash_attn_backward", mutates_args=("dq", "dk", "dv"), device_types="npu")
+@_torch_custom_op_wrapper("flash_attn::_flash_attn_backward", mutates_args=("dq", "dk", "dv"), device_types="npu")
 def _flash_attn_backward(
     dout: torch.Tensor,
     q: torch.Tensor,
@@ -286,7 +286,7 @@ def _flash_attn_backward(
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
-    softmax_d, *rest = flash_attn_npu_3.bwd(
+    softmax_d, *rest = flash_attn.bwd(
         dout,
         q,
         k,
@@ -313,7 +313,7 @@ def _flash_attn_backward(
     return softmax_d
 
 
-@_torch_register_fake_wrapper("flash_attn_npu_3::_flash_attn_backward")
+@_torch_register_fake_wrapper("flash_attn::_flash_attn_backward")
 def _flash_attn_backward_fake(
     dout: torch.Tensor,
     q: torch.Tensor,
@@ -915,7 +915,7 @@ def flash_attn_varlen_func(
 
 
 def flash_attn_combine(out_partial, lse_partial, out=None, out_dtype=None):
-    return flash_attn_npu_3.fwd_combine(out_partial, lse_partial, out, out_dtype)
+    return flash_attn.fwd_combine(out_partial, lse_partial, out, out_dtype)
 
 
 def flash_attn_with_kvcache(
@@ -1103,7 +1103,7 @@ def get_scheduler_metadata(
     cache_seqlens = maybe_contiguous(cache_seqlens)
     if headdim_v is None:
         headdim_v = headdim
-    scheduler_metadata = flash_attn_npu_3.get_scheduler_metadata(
+    scheduler_metadata = flash_attn.get_scheduler_metadata(
         batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v,
         qkv_dtype,
         cache_seqlens,

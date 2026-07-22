@@ -100,7 +100,7 @@ class BishengBuildExt(build_ext):
             f"-I{ascend_home}/include/experiment/msprof",
             f"-I{torch_package_path}/include",
             f"-I{torch_package_path}/include/torch/csrc/api/include",
-            f"-I{this_dir}/csrc/catlass/include",
+            f"-I{this_dir}/csrc/",
             *[f"-L{p}" for p in asc_lib_paths],
             f"-L{torch_lib}",
             f"-L{torch_npu_lib}",
@@ -134,21 +134,21 @@ if os.path.isdir(".git"):
     subprocess.run(["git", "submodule", "update", "--init", "csrc/catlass"], check=True)
 else:
     assert (
-        os.path.exists("csrc/catlass/include/catlass/catlass.hpp")
+        os.path.exists("csrc/catlass/catlass.hpp")
     ), "csrc/catlass is missing, please use source distribution or git clone"
 
-source_files_v3 = glob.glob(os.path.join(this_dir, "csrc/flash_attn_npu_v3", "flash_api.cpp"), recursive=True)
+source_files = glob.glob(os.path.join(this_dir, "csrc/flash_attn_npu", "flash_api.cpp"), recursive=True)
 
 if not SKIP_NPU_BUILD:
     ext_modules.append(Extension(
-        name="flash_attn_npu_3",
-        sources=source_files_v3,
+        name="flash_attn",
+        sources=source_files,
         language="c++",
     ))
 
 
 def get_package_version():
-    with open(Path(this_dir) / "flash_attn_npu_v3" / "__init__.py", "r") as f:
+    with open(Path(this_dir) / "flash_attn_npu" / "__init__.py", "r") as f:
         version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
     public_version = ast.literal_eval(version_match.group(1))
     local_version = os.environ.get("FLASH_ATTN_LOCAL_VERSION")

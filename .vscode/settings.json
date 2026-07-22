@@ -1,9 +1,0 @@
-{
-    "files.associations": {
-        "*.asc": "cpp",
-        "*.aicpu": "cpp",
-    },
-    "python-envs.defaultEnvManager": "ms-python.python:system",
-    "python-envs.defaultPackageManager": "ms-python.python:conda",
-    "cmake.ignoreCMakeListsMissing": true
-}

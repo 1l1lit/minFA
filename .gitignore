@@ -1,13 +1,12 @@
-.DS_store
-
 # IDE-related
 .idea/
-# .vscode/
+.vscode/
 
-# Distribution / packaging
+# Distribution / packaging / testing
 build/
 *.egg-info/
 __pycache__/
+.pytest_cache/
 
 # Dev
 venv
