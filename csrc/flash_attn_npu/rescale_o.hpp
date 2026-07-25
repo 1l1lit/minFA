@@ -191,7 +191,7 @@ public:
 
             // go = castfp32to16(go)
             RoundMode roundMode =
-                std::is_same<ElementOutput, bfloat16_t>::value ? RoundMode::CAST_RINT : RoundMode::CAST_NONE;
+                std::is_same_v<ElementOutput, bfloat16_t> ? RoundMode::CAST_RINT : RoundMode::CAST_NONE;
             Cast<ElementOutput, float, false>(
                 go16, go32, roundMode, MASK_NUL, (curRowNum * embedRound + FLT_PER_REPEAT - 1) / FLT_PER_REPEAT,
                 UnaryRepeatParams(1, 1, 4, 8));

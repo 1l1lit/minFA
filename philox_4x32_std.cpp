@@ -48,10 +48,10 @@ private:
         c3 = o[3 * N];
 
         uint64_t rsvdCnt = 0;
-        GatherMask(c0, c, 3, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
-        GatherMask(c1, c, 4, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
-        GatherMask(c2, c, 5, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
-        GatherMask(c3, c, 6, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
+        GatherMask(c0, c, 3, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
+        GatherMask(c1, c, 4, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
+        GatherMask(c2, c, 5, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
+        GatherMask(c3, c, 6, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
 
         t0 = c[0];
         t1 = c[N];
@@ -79,9 +79,9 @@ private:
         const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src0, const LocalTensor<uint32_t>& src1,
         uint32_t n)
     {
-        Or(dst.AsU16(), src0.AsU16(), src1.AsU16(), 2 * n);
+        Or(dst.AsU16(), src0.AsU16(), src1.AsU16(), 2 * n); // src0, src1 与 dst 不能重叠
         PipeBarrier<PIPE_V>();
-        And(src0.AsU16(), src0.AsU16(), src1.AsU16(), 2 * n); // src0 被覆盖，且 src0 与 dst 不能重叠
+        And(src0.AsU16(), src0.AsU16(), src1.AsU16(), 2 * n);
         PipeBarrier<PIPE_V>();
         Not(src0.AsU16(), src0.AsU16(), 2 * n);
         PipeBarrier<PIPE_V>();
@@ -203,7 +203,7 @@ private:
     LocalTensor<uint32_t> c0, c1, c2, c3;
     LocalTensor<uint32_t> t0, t1, t2, t3, t4, t5;
 
-    GlobalTensor<uint32_t> g_c, g_k, g_o;
+    GlobalTensor<uint32_t> g_c, g_o;
 };
 
 __global__ __aicore__ void kernel_func(GM_ADDR c, uint64_t k, GM_ADDR o)
@@ -250,8 +250,7 @@ std::vector<uint32_t> philox_npu(std::vector<uint32_t>& c, uint64_t k)
 
 std::vector<uint32_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
 {
-    int batch = c.size() / 4;
-    for (int b = 0; b < batch; b++) {
+    for (int b = 0; b < N; b++) {
         uint32_t& c0 = c[4 * b];
         uint32_t& c1 = c[4 * b + 1];
         uint32_t& c2 = c[4 * b + 2];

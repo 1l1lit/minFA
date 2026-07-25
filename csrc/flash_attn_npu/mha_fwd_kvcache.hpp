@@ -345,13 +345,13 @@ public:
                                 Arch::CrossCoreWaitFlag(qkReady);
                                 epilogueOnlineSoftmax(
                                     gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0),
-                                    (kvSIdx == noMaskStackSeqNum - 1), qSBlockSize, qNBlockSize, curStackTileMod);
+                                    (kvSIdx == noMaskStackSeqNum - 1), curStackTileMod);
                             }
                         } else {
                             Arch::CrossCoreWaitFlag(qkReady);
                             epilogueOnlineSoftmax(
                                 gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0), 0,
-                                qSBlockSize, qNBlockSize, curStackTileMod);
+                                curStackTileMod);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }
