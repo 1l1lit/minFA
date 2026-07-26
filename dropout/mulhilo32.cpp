@@ -4,8 +4,7 @@
 int main()
 {
     std::mt19937 gen(42);
-    std::uniform_int_distribution<uint32_t> dis(0, 0xffffffff);
-    uint32_t x = dis(gen), a = dis(gen);
+    uint32_t x = gen(), a = gen();
     uint64_t z = static_cast<uint64_t>(x) * static_cast<uint64_t>(a);
 
     uint32_t xl = x & 0xffff, al = a & 0xffff;

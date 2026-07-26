@@ -245,7 +245,7 @@ public:
                     AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong);
                     AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong + 2);
 
-                    toggleFlag(l0ABPingPong);
+                    l0ABPingPong ^= 1;
                 }
 
                 // 等待 M 计算完成，再进行 L0C -> GM 搬运
@@ -264,10 +264,10 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::FIX_M>(
                     l0CPingPong); // 通知 L0C -> GM 搬运完成，可以进行下一轮 M 计算
 
-                toggleFlag(l0CPingPong);
+                l0CPingPong ^= 1;
             }
 
-            toggleFlag(l1BPingPong);
+            l1BPingPong ^= 1;
         }
     }
 

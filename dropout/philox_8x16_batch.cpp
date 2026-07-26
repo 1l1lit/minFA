@@ -28,6 +28,10 @@ public:
         g_c.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(c), 4 * N);
         g_o.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t*>(o), 8 * N);
 
+        pipe.InitBuffer(cQ, 1, 4 * SIZE);
+        pipe.InitBuffer(oQ, 1, 4 * SIZE);
+        pipe.InitBuffer(tB, 2 * SIZE);
+
         k0 = static_cast<uint32_t>(k & 0xffffffff);
         k1 = static_cast<uint32_t>(k >> 32);
     }
@@ -40,21 +44,6 @@ public:
     }
 
 private:
-    __aicore__ inline void init()
-    {
-        c0 = c[0];
-        c1 = c[N];
-        c2 = c[2 * N];
-        c3 = c[3 * N];
-
-        t0 = t[0];
-        t1 = t[N];
-        t2 = t[2 * N];
-        t3 = t[3 * N];
-        t4 = t[4 * N];
-        t5 = t[5 * N];
-    }
-
     __aicore__ inline void Xor(
         const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src0, const LocalTensor<uint32_t>& src1,
         uint32_t n)
@@ -159,32 +148,53 @@ private:
 private:
     __aicore__ inline void Load()
     {
+        c = cQ.AllocTensor<uint32_t>();
         DataCopy(c, g_c, 4 * N);
-        SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+        cQ.EnQue(c);
     }
 
     __aicore__ inline void Compute()
     {
-        init();
+        c = cQ.DeQue<uint32_t>();
+        o = oQ.AllocTensor<uint16_t>();
+
+        c0 = c[0];
+        c1 = c[N];
+        c2 = c[2 * N];
+        c3 = c[3 * N];
+
+        t0 = o.AsU32()[0];
+        t1 = o.AsU32()[N];
+        t2 = o.AsU32()[2 * N];
+        t3 = o.AsU32()[3 * N];
+        t4 = tB.GetWithOffset<uint32_t>(N, 0);
+        t5 = tB.GetWithOffset<uint32_t>(N, SIZE);
+
         philox();
         gather();
+
+        oQ.EnQue(o);
+        cQ.FreeTensor(c);
     }
 
     __aicore__ inline void Store()
     {
-        SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
-        WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+        o = oQ.DeQue<uint16_t>();
         DataCopy(g_o, o, 8 * N);
+        oQ.FreeTensor(o);
     }
 
 private:
-    LocalTensor<uint32_t> c = LocalTensor<uint32_t>(TPosition::VECCALC, 0, 4 * N);
-    LocalTensor<uint32_t> t = LocalTensor<uint32_t>(TPosition::VECCALC, 4 * SIZE, 6 * N);
-    LocalTensor<uint16_t> o = LocalTensor<uint16_t>(TPosition::VECCALC, 4 * SIZE, 8 * N);
-    
-    LocalTensor<uint32_t> c0, c1, c2, c3;
+    TPipe pipe;
+    TQue<TPosition::VECIN, 1> cQ;
+    TQue<TPosition::VECOUT, 1> oQ;
+    TBuf<TPosition::VECCALC> tB;
+
+    LocalTensor<uint32_t> c;
+    LocalTensor<uint16_t> o;
     uint32_t k0, k1;
+
+    LocalTensor<uint32_t> c0, c1, c2, c3;
     LocalTensor<uint32_t> t0, t1, t2, t3, t4, t5;
 
     GlobalTensor<uint32_t> g_c;
@@ -278,17 +288,15 @@ std::vector<uint16_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
 int main()
 {
     std::mt19937 gen(42);
-    std::uniform_int_distribution<uint32_t> dis(0, 0xffffffff);
-
     std::vector<uint32_t> c(4 * N);
     std::cout << "Input c: " << std::endl;
     for (int i = 0; i < 4 * N; i++) {
-        c[i] = dis(gen);
+        c[i] = gen();
         std::cout << c[i] << " ";
     }
     std::cout << std::endl;
 
-    uint64_t k = (static_cast<uint64_t>(dis(gen)) << 32) | dis(gen);
+    uint64_t k = (static_cast<uint64_t>(gen()) << 32) | gen();
 
     std::vector<uint16_t> o = philox_npu(c, k);
     std::cout << "NPU output: " << std::endl;

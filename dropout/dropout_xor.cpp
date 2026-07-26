@@ -37,7 +37,7 @@ public:
 
         pipe.InitBuffer(srcQ, 1, SIZE);
         pipe.InitBuffer(dstQ, 1, SIZE);
-        pipe.InitBuffer(tmpB, 2 * N * sizeof(uint32_t));
+        pipe.InitBuffer(tmpB, SIZE + 2 * N * sizeof(uint8_t));
 
         f0 = arg.c0;
         f1 = arg.c1;
@@ -62,10 +62,11 @@ private:
         c2 = dst.AsU32()[2 * N];
         c3 = dst.AsU32()[3 * N];
 
-        CreateVecIndex(c0.AsI32(), static_cast<int32_t>(f0), N);
-        CreateVecIndex(c1.AsI32(), static_cast<int32_t>(f1), N);
-        CreateVecIndex(c2.AsI32(), static_cast<int32_t>(f2), N);
-        CreateVecIndex(c3.AsI32(), static_cast<int32_t>(f3), N);
+        CreateVecIndex(c3.AsI32(), 0, N);
+        Adds(c0.AsI32(), c3.AsI32(), static_cast<int32_t>(f0), N);
+        Adds(c1.AsI32(), c3.AsI32(), static_cast<int32_t>(f1), N);
+        Adds(c2.AsI32(), c3.AsI32(), static_cast<int32_t>(f2), N);
+        Adds(c3.AsI32(), c3.AsI32(), static_cast<int32_t>(f3), N);
 
         t0 = dst.AsU32()[4 * N];
         t1 = dst.AsU32()[5 * N];
@@ -73,22 +74,23 @@ private:
         t3 = dst.AsU32()[7 * N];
         t4 = tmpB.GetWithOffset<uint32_t>(N, 0);
         t5 = tmpB.GetWithOffset<uint32_t>(N, N * sizeof(uint32_t));
+        t6 = tmpB.GetWithOffset<half>(16 * N, 0);
 
         o = dst.AsU16()[8 * N];
-        cmp = tmpB.GetWithOffset<uint8_t>(2 * N, 0);
+        cmp = tmpB.GetWithOffset<uint8_t>(2 * N, SIZE);
     }
 
     __aicore__ inline void Xor(
-        const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src0, const LocalTensor<uint32_t>& src1,
+        const LocalTensor<uint16_t>& dst, const LocalTensor<uint16_t>& src0, const LocalTensor<uint16_t>& src1,
         uint32_t n)
     {
-        Or(dst.AsU16(), src0.AsU16(), src1.AsU16(), 2 * n); // src0, src1 与 dst 不能重叠
+        Or(dst, src0, src1, n); // src0, src1 与 dst 不能重叠
         PipeBarrier<PIPE_V>();
-        And(src0.AsU16(), src0.AsU16(), src1.AsU16(), 2 * n);
+        And(src0, src0, src1, n);
         PipeBarrier<PIPE_V>();
-        Not(src0.AsU16(), src0.AsU16(), 2 * n);
+        Not(src0, src0, n);
         PipeBarrier<PIPE_V>();
-        And(dst.AsU16(), dst.AsU16(), src0.AsU16(), 2 * n);
+        And(dst, dst, src0, n);
     }
 
     __aicore__ inline void Mask16(const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src, uint32_t n)
@@ -144,14 +146,14 @@ private:
         Duplicate(t0, k0, N);
         Duplicate(t1, k1, N);
         PipeBarrier<PIPE_V>();
-        Xor(t2, t0, c1, N); // t2 = c1 ^ k0
-        Xor(t3, t1, c3, N); // t3 = c3 ^ k1
+        Xor(t2.AsU16(), t0.AsU16(), c1.AsU16(), 2 * N); // t2 = c1 ^ k0
+        Xor(t3.AsU16(), t1.AsU16(), c3.AsU16(), 2 * N); // t3 = c3 ^ k1
 
         mulhilo32(t4, c3, c0, 0xd2511f53); // t4 = h0, c3 = l0
         mulhilo32(t5, c1, c2, 0xcd9e8d57); // t5 = h1, c1 = l1
         PipeBarrier<PIPE_V>();
-        Xor(c2, t3, t4, N); // c2 = h0 ^ c3 ^ k1
-        Xor(c0, t2, t5, N); // c0 = h1 ^ c1 ^ k0
+        Xor(c2.AsU16(), t3.AsU16(), t4.AsU16(), 2 * N); // c2 = h0 ^ c3 ^ k1
+        Xor(c0.AsU16(), t2.AsU16(), t5.AsU16(), 2 * N); // c0 = h1 ^ c1 ^ k0
     }
 
     __aicore__ inline void philox()
@@ -182,16 +184,19 @@ private:
 
     __aicore__ inline void dropout()
     {
-        Cast(dst, o.AsU8(), RoundMode::CAST_NONE, 16 * N);
-        PipeBarrier<PIPE_V>();
-        CompareScalar(cmp, dst, THRESH, CMPMODE::GT, 16 * N);
-        PipeBarrier<PIPE_V>();
-
         if constexpr (RETURN_DROPOUT_) {
-            Duplicate(dst, static_cast<half>(1), 16 * N);
-            Select(dst, cmp, dst, static_cast<half>(-1), SELMODE::VSEL_TENSOR_SCALAR_MODE, 16 * N);
-            Mul(dst, dst, src, 16 * N);
+            Cast(dst, o.AsU8(), RoundMode::CAST_NONE, 16 * N);
+            PipeBarrier<PIPE_V>();
+            CompareScalar(cmp, dst, THRESH, CMPMODE::LT, 16 * N);
+            PipeBarrier<PIPE_V>();
+            Duplicate(t6.AsU16(), static_cast<uint16_t>(0x8000), 16 * N);
+            Select(t6, cmp, t6, static_cast<half>(0), SELMODE::VSEL_TENSOR_SCALAR_MODE, 16 * N); // 反转符号位
+            Xor(dst.AsU16(), src.AsU16(), t6.AsU16(), 16 * N);
         } else {
+            Cast(dst, o.AsU8(), RoundMode::CAST_NONE, 16 * N);
+            PipeBarrier<PIPE_V>();
+            CompareScalar(cmp, dst, THRESH, CMPMODE::GT, 16 * N);
+            PipeBarrier<PIPE_V>();
             Select(dst, cmp, src, static_cast<half>(0), SELMODE::VSEL_TENSOR_SCALAR_MODE, 16 * N);
         }
     }
@@ -236,6 +241,7 @@ private:
     LocalTensor<uint32_t> c0, c1, c2, c3;
     uint32_t k0, k1;
     LocalTensor<uint32_t> t0, t1, t2, t3, t4, t5;
+    LocalTensor<half> t6;
     LocalTensor<uint16_t> o;
     LocalTensor<uint8_t> cmp;
 
@@ -346,23 +352,21 @@ std::vector<half> dropout_cpu(std::vector<half>& src, const PhiloxArg& arg)
 int main()
 {
     std::mt19937 gen(37);
-    std::uniform_int_distribution<uint32_t> dis(0, 0xffffffff);
-
     std::vector<half> src(16 * N);
     std::cout << "Input: " << std::endl;
     for (int i = 0; i < 16 * N; i++) {
-        src[i] = static_cast<half>(dis(gen) / static_cast<float>(std::numeric_limits<uint32_t>::max()));
+        src[i] = static_cast<half>(gen() / static_cast<float>(std::numeric_limits<uint32_t>::max()));
         std::cout << static_cast<float>(src[i]) << " ";
     }
     std::cout << std::endl;
 
     PhiloxArg arg;
-    arg.c0 = dis(gen);
-    arg.c1 = dis(gen);
-    arg.c2 = dis(gen);
-    arg.c3 = dis(gen);
-    arg.k0 = dis(gen);
-    arg.k1 = dis(gen);
+    arg.c0 = gen();
+    arg.c1 = gen();
+    arg.c2 = gen();
+    arg.c3 = gen();
+    arg.k0 = gen();
+    arg.k1 = gen();
 
     std::vector<half> dst = dropout_npu<true>(src, arg);
     std::cout << "NPU output: " << std::endl;

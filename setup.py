@@ -35,6 +35,7 @@ BASE_WHEEL_URL = (
 # SKIP_NPU_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files, without any NPU compilation
 FORCE_BUILD = os.getenv("FLASH_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
 SKIP_NPU_BUILD = os.getenv("FLASH_ATTENTION_SKIP_NPU_BUILD", "FALSE") == "TRUE"
+DEBUG_BUILD = os.getenv("FLASH_ATTENTION_DEBUG_BUILD", "FALSE") == "TRUE"
 
 def get_platform():
     """
@@ -79,14 +80,14 @@ class BishengBuildExt(build_ext):
 
         compile_cmd = [
             "bisheng",
-            "-O0",
+            "-O0" if DEBUG_BUILD else "-O2",
             "-x", "asc",
             "--npu-arch=dav-2201",
             *(["--cce-auto-infer-kernel-type=false"] if parse(torch_npu.utils.get_cann_version()) >= parse("9.0.0") else []),
             "-shared",
             "-fPIC",
             "-std=c++17",
-            "-g3",
+            *(["-g3"] if DEBUG_BUILD else []),
             abi_flag,
             *[f"-I{p}" for p in asc_include_paths],
             f"-I{python_include}",

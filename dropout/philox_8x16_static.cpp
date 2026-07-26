@@ -7,9 +7,10 @@
 using namespace AscendC;
 
 #define AsU16() template ReinterpretCast<uint16_t>()
+#define AsU32() template ReinterpretCast<uint32_t>()
 #define AsI32() template ReinterpretCast<int32_t>()
 
-constexpr int N = 512;
+constexpr int N = 32; // 需为 16 的倍数
 constexpr int SIZE = N * sizeof(uint32_t);
 
 template <class T, class U>
@@ -25,11 +26,7 @@ public:
     __aicore__ inline void Init(GM_ADDR c, uint64_t k, GM_ADDR o)
     {
         g_c.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(c), 4 * N);
-        g_o.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(o), 4 * N);
-
-        pipe.InitBuffer(cQ, 1, 4 * SIZE);
-        pipe.InitBuffer(oQ, 1, 4 * SIZE);
-        pipe.InitBuffer(tB, 2 * SIZE);
+        g_o.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t*>(o), 8 * N);
 
         k0 = static_cast<uint32_t>(k & 0xffffffff);
         k1 = static_cast<uint32_t>(k >> 32);
@@ -43,6 +40,21 @@ public:
     }
 
 private:
+    __aicore__ inline void init()
+    {
+        c0 = c[0];
+        c1 = c[N];
+        c2 = c[2 * N];
+        c3 = c[3 * N];
+
+        t0 = t[0];
+        t1 = t[N];
+        t2 = t[2 * N];
+        t3 = t[3 * N];
+        t4 = t[4 * N];
+        t5 = t[5 * N];
+    }
+
     __aicore__ inline void Xor(
         const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src0, const LocalTensor<uint32_t>& src1,
         uint32_t n)
@@ -55,7 +67,7 @@ private:
         PipeBarrier<PIPE_V>();
         And(dst.AsU16(), dst.AsU16(), src0.AsU16(), 2 * n);
     }
-    
+
     __aicore__ inline void Mask16(const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src, uint32_t n)
     {
         Duplicate(dst, 0xffffu, n); // dst 与 src 不能重叠
@@ -131,58 +143,52 @@ private:
         PipeBarrier<PIPE_V>();
     }
 
+    __aicore__ inline void gather()
+    {
+        uint64_t rsvdCnt = 0;
+        GatherMask(o[0], c0.AsU16(), 1, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+        GatherMask(o[N], c0.AsU16(), 2, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+        GatherMask(o[2 * N], c1.AsU16(), 1, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+        GatherMask(o[3 * N], c1.AsU16(), 2, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+        GatherMask(o[4 * N], c2.AsU16(), 1, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+        GatherMask(o[5 * N], c2.AsU16(), 2, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+        GatherMask(o[6 * N], c3.AsU16(), 1, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+        GatherMask(o[7 * N], c3.AsU16(), 2, false, 0, {1, CeilDiv(N, 64), 8, 0}, rsvdCnt);
+    }
+
 private:
     __aicore__ inline void Load()
     {
-        c = cQ.AllocTensor<uint32_t>();
         DataCopy(c, g_c, 4 * N);
-        cQ.EnQue(c);
+        SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
     }
 
     __aicore__ inline void Compute()
     {
-        c = cQ.DeQue<uint32_t>();
-        o = oQ.AllocTensor<uint32_t>();
-
-        c0 = c[0];
-        c1 = c[N];
-        c2 = c[2 * N];
-        c3 = c[3 * N];
-
-        t0 = o[0];
-        t1 = o[N];
-        t2 = o[2 * N];
-        t3 = o[3 * N];
-        t4 = tB.GetWithOffset<uint32_t>(N, 0);
-        t5 = tB.GetWithOffset<uint32_t>(N, SIZE);
-
+        init();
         philox();
-        Copy(o, c, 64, CeilDiv(N, 16), {1, 1, 8, 8});
-
-        oQ.EnQue(o);
-        cQ.FreeTensor(c);
+        gather();
     }
 
     __aicore__ inline void Store()
     {
-        o = oQ.DeQue<uint32_t>();
-        DataCopy(g_o, o, 4 * N);
-        oQ.FreeTensor(o);
+        SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+        WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+        DataCopy(g_o, o, 8 * N);
     }
 
 private:
-    TPipe pipe;
-    TQue<TPosition::VECIN, 1> cQ;
-    TQue<TPosition::VECOUT, 1> oQ;
-    TBuf<TPosition::VECCALC> tB;
-
-    LocalTensor<uint32_t> c, o;
-    uint32_t k0, k1;
-
+    LocalTensor<uint32_t> c = LocalTensor<uint32_t>(TPosition::VECCALC, 0, 4 * N);
+    LocalTensor<uint32_t> t = LocalTensor<uint32_t>(TPosition::VECCALC, 4 * SIZE, 6 * N);
+    LocalTensor<uint16_t> o = LocalTensor<uint16_t>(TPosition::VECCALC, 4 * SIZE, 8 * N);
+    
     LocalTensor<uint32_t> c0, c1, c2, c3;
+    uint32_t k0, k1;
     LocalTensor<uint32_t> t0, t1, t2, t3, t4, t5;
 
-    GlobalTensor<uint32_t> g_c, g_o;
+    GlobalTensor<uint32_t> g_c;
+    GlobalTensor<uint16_t> g_o;
 };
 
 __global__ __aicore__ void kernel_func(GM_ADDR c, uint64_t k, GM_ADDR o)
@@ -193,7 +199,7 @@ __global__ __aicore__ void kernel_func(GM_ADDR c, uint64_t k, GM_ADDR o)
     op.Main();
 }
 
-std::vector<uint32_t> philox_npu(std::vector<uint32_t>& c, uint64_t k)
+std::vector<uint16_t> philox_npu(std::vector<uint32_t>& c, uint64_t k)
 {
     aclInit(nullptr);
     aclrtSetDevice(0);
@@ -215,7 +221,7 @@ std::vector<uint32_t> philox_npu(std::vector<uint32_t>& c, uint64_t k)
     aclrtSynchronizeStream(stream);
 
     aclrtMemcpy(h_o, 4 * SIZE, d_o, 4 * SIZE, ACL_MEMCPY_DEVICE_TO_HOST);
-    std::vector<uint32_t> o(reinterpret_cast<uint32_t*>(h_o), reinterpret_cast<uint32_t*>(h_o) + 4 * N);
+    std::vector<uint16_t> o(reinterpret_cast<uint16_t*>(h_o), reinterpret_cast<uint16_t*>(h_o) + 8 * N);
 
     aclrtFreeHost(h_o);
     aclrtFree(d_c);
@@ -227,9 +233,9 @@ std::vector<uint32_t> philox_npu(std::vector<uint32_t>& c, uint64_t k)
     return o;
 }
 
-std::vector<uint32_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
+std::vector<uint16_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
 {
-    std::vector<uint32_t> o(4 * N);
+    std::vector<uint16_t> o(8 * N);
     for (int b = 0; b < N; b++) {
         uint32_t c0 = c[b];
         uint32_t c1 = c[N + b];
@@ -253,10 +259,18 @@ std::vector<uint32_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
         uint64_t p1 = static_cast<uint64_t>(c2) * 0xcd9e8d57;
         uint32_t h0 = p0 >> 32, l0 = p0 & 0xffffffff;
         uint32_t h1 = p1 >> 32, l1 = p1 & 0xffffffff;
-        o[b] = h1 ^ c1 ^ k0;
-        o[N + b] = l1;
-        o[2 * N + b] = h0 ^ c3 ^ k1;
-        o[3 * N + b] = l0;
+        uint32_t o0 = h1 ^ c1 ^ k0;
+        uint32_t o1 = l1;
+        uint32_t o2 = h0 ^ c3 ^ k1;
+        uint32_t o3 = l0;
+        o[b] = o0 & 0xffff;
+        o[N + b] = o0 >> 16;
+        o[2 * N + b] = o1 & 0xffff;
+        o[3 * N + b] = o1 >> 16;
+        o[4 * N + b] = o2 & 0xffff;
+        o[5 * N + b] = o2 >> 16;
+        o[6 * N + b] = o3 & 0xffff;
+        o[7 * N + b] = o3 >> 16;
     }
     return o;
 }
@@ -264,26 +278,24 @@ std::vector<uint32_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
 int main()
 {
     std::mt19937 gen(42);
-    std::uniform_int_distribution<uint32_t> dis(0, 0xffffffff);
-
     std::vector<uint32_t> c(4 * N);
     std::cout << "Input c: " << std::endl;
     for (int i = 0; i < 4 * N; i++) {
-        c[i] = dis(gen);
+        c[i] = gen();
         std::cout << c[i] << " ";
     }
     std::cout << std::endl;
 
-    uint64_t k = (static_cast<uint64_t>(dis(gen)) << 32) | dis(gen);
+    uint64_t k = (static_cast<uint64_t>(gen()) << 32) | gen();
 
-    std::vector<uint32_t> o = philox_npu(c, k);
+    std::vector<uint16_t> o = philox_npu(c, k);
     std::cout << "NPU output: " << std::endl;
     for (const auto& val : o) {
         std::cout << val << " ";
     }
     std::cout << std::endl;
 
-    std::vector<uint32_t> r = philox_cpu(c, k);
+    std::vector<uint16_t> r = philox_cpu(c, k);
     std::cout << "CPU output: " << std::endl;
     for (const auto& val : r) {
         std::cout << val << " ";

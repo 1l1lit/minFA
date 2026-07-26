@@ -13,6 +13,7 @@ namespace KernelCommon {
 constexpr uint32_t QK_READY_ID = 1;
 constexpr uint32_t SOFTMAX_READY_ID = 2;
 constexpr uint32_t PV_READY_ID = 3;
+constexpr uint32_t PRE_LOAD = 1;
 constexpr uint32_t PRE_LAUNCH = 2;
 constexpr uint32_t N_SPLIT_HELPER = 2;
 constexpr uint32_t MAX_KV_STACK_LEN = 512; // KV 分块的大小上限
@@ -87,9 +88,6 @@ CATLASS_DEVICE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
 
 // 获取 Q 的 S（序列长度）维分块大小
 CATLASS_DEVICE uint32_t GetQSBlockTile(uint32_t kvSeqlen) { return Q_TILE_CEIL; }
-
-// 翻转 pingPongFlag
-CATLASS_DEVICE void toggleFlag(uint32_t& pingPongFlag) { pingPongFlag ^= 1; }
 
 // 设置向量掩码
 CATLASS_DEVICE void SetVecMaskLen(uint32_t len)

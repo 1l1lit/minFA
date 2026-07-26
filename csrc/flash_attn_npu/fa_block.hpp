@@ -32,14 +32,12 @@ enum class LseModeT { NONE = 0, OUT_ONLY = 1 };
 
 template <LseModeT LSE_MODE_, bool HAS_SOFTCAP_ = false>
 struct EpilogueAtlasA2OnlineSoftmaxT {
-    using ArchTag = Arch::AtlasA2;
     static constexpr LseModeT LSE_MODE = LSE_MODE_;
     static constexpr bool HAS_SOFTCAP = HAS_SOFTCAP_;
 };
 
 template <LseModeT LSE_MODE_>
 struct EpilogueAtlasA2RescaleOT {
-    using ArchTag = Arch::AtlasA2;
     static constexpr LseModeT LSE_MODE = LSE_MODE_;
 };
 } // namespace Catlass::Epilogue

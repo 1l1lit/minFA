@@ -9,8 +9,14 @@ using namespace AscendC;
 #define AsU16() template ReinterpretCast<uint16_t>()
 #define AsI32() template ReinterpretCast<int32_t>()
 
-constexpr int N = 32;
+constexpr int N = 512;
 constexpr int SIZE = N * sizeof(uint32_t);
+
+template <class T, class U>
+__aicore__ inline constexpr auto CeilDiv(T const& dividend, U const& divisor)
+{
+    return (dividend + divisor - 1) / divisor;
+}
 
 class Kernel {
 public:
@@ -23,13 +29,10 @@ public:
 
         pipe.InitBuffer(cQ, 1, 4 * SIZE);
         pipe.InitBuffer(oQ, 1, 4 * SIZE);
+        pipe.InitBuffer(tB, 2 * SIZE);
 
         k0 = static_cast<uint32_t>(k & 0xffffffff);
         k1 = static_cast<uint32_t>(k >> 32);
-
-        pipe.InitBuffer(tB, 2 * SIZE);
-        t4 = tB.GetWithOffset<uint32_t>(N, 0);
-        t5 = tB.GetWithOffset<uint32_t>(N, SIZE);
     }
 
     __aicore__ inline void Main()
@@ -40,41 +43,6 @@ public:
     }
 
 private:
-    __aicore__ inline void gather()
-    {
-        c0 = o[0];
-        c1 = o[N];
-        c2 = o[2 * N];
-        c3 = o[3 * N];
-
-        uint64_t rsvdCnt = 0;
-        GatherMask(c0, c, 3, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
-        GatherMask(c1, c, 4, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
-        GatherMask(c2, c, 5, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
-        GatherMask(c3, c, 6, false, 0, {1, N / 16, 8, 0}, rsvdCnt);
-
-        t0 = c[0];
-        t1 = c[N];
-        t2 = c[2 * N];
-        t3 = c[3 * N];
-    }
-
-    __aicore__ inline void scatter()
-    {
-        uint64_t dst[16], src[16];
-        for (int i = 0; i < 16; i++) {
-            dst[i] = c[8 * i].GetPhyAddr();
-            src[i] = o[8 * i].GetPhyAddr();
-        }
-        TransDataTo5HD<uint32_t>(dst, src, {false, false, 1, 0, 0});
-
-        uint64_t rsvdCnt = 0;
-        GatherMask(o[0], c, 3, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
-        GatherMask(o[N], c, 4, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
-        GatherMask(o[2 * N], c, 5, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
-        GatherMask(o[3 * N], c, 6, false, 0, {1, N / 2, 8, 0}, rsvdCnt);
-    }
-
     __aicore__ inline void Xor(
         const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src0, const LocalTensor<uint32_t>& src1,
         uint32_t n)
@@ -87,7 +55,7 @@ private:
         PipeBarrier<PIPE_V>();
         And(dst.AsU16(), dst.AsU16(), src0.AsU16(), 2 * n);
     }
-
+    
     __aicore__ inline void Mask16(const LocalTensor<uint32_t>& dst, const LocalTensor<uint32_t>& src, uint32_t n)
     {
         Duplicate(dst, 0xffffu, n); // dst 与 src 不能重叠
@@ -176,9 +144,20 @@ private:
         c = cQ.DeQue<uint32_t>();
         o = oQ.AllocTensor<uint32_t>();
 
-        gather();
+        c0 = c[0];
+        c1 = c[N];
+        c2 = c[2 * N];
+        c3 = c[3 * N];
+
+        t0 = o[0];
+        t1 = o[N];
+        t2 = o[2 * N];
+        t3 = o[3 * N];
+        t4 = tB.GetWithOffset<uint32_t>(N, 0);
+        t5 = tB.GetWithOffset<uint32_t>(N, SIZE);
+
         philox();
-        scatter();
+        Copy(o, c, 64, CeilDiv(N, 16), {1, 1, 8, 8});
 
         oQ.EnQue(o);
         cQ.FreeTensor(c);
@@ -250,11 +229,12 @@ std::vector<uint32_t> philox_npu(std::vector<uint32_t>& c, uint64_t k)
 
 std::vector<uint32_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
 {
+    std::vector<uint32_t> o(4 * N);
     for (int b = 0; b < N; b++) {
-        uint32_t& c0 = c[4 * b];
-        uint32_t& c1 = c[4 * b + 1];
-        uint32_t& c2 = c[4 * b + 2];
-        uint32_t& c3 = c[4 * b + 3];
+        uint32_t c0 = c[b];
+        uint32_t c1 = c[N + b];
+        uint32_t c2 = c[2 * N + b];
+        uint32_t c3 = c[3 * N + b];
         uint32_t k0 = k & 0xffffffff;
         uint32_t k1 = k >> 32;
         for (int i = 0; i < 6; i++) {
@@ -273,28 +253,26 @@ std::vector<uint32_t> philox_cpu(std::vector<uint32_t>& c, uint64_t k)
         uint64_t p1 = static_cast<uint64_t>(c2) * 0xcd9e8d57;
         uint32_t h0 = p0 >> 32, l0 = p0 & 0xffffffff;
         uint32_t h1 = p1 >> 32, l1 = p1 & 0xffffffff;
-        c0 = h1 ^ c1 ^ k0;
-        c1 = l1;
-        c2 = h0 ^ c3 ^ k1;
-        c3 = l0;
+        o[b] = h1 ^ c1 ^ k0;
+        o[N + b] = l1;
+        o[2 * N + b] = h0 ^ c3 ^ k1;
+        o[3 * N + b] = l0;
     }
-    return c;
+    return o;
 }
 
 int main()
 {
     std::mt19937 gen(42);
-    std::uniform_int_distribution<uint32_t> dis(0, 0xffffffff);
-
     std::vector<uint32_t> c(4 * N);
     std::cout << "Input c: " << std::endl;
     for (int i = 0; i < 4 * N; i++) {
-        c[i] = dis(gen);
+        c[i] = gen();
         std::cout << c[i] << " ";
     }
     std::cout << std::endl;
 
-    uint64_t k = (static_cast<uint64_t>(dis(gen)) << 32) | dis(gen);
+    uint64_t k = (static_cast<uint64_t>(gen()) << 32) | gen();
 
     std::vector<uint32_t> o = philox_npu(c, k);
     std::cout << "NPU output: " << std::endl;
