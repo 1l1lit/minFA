@@ -30,10 +30,9 @@ struct MmadAtlasA2FAIQKT : public Gemm::MmadAtlasA2 {
 namespace Catlass::Epilogue {
 enum class LseModeT { NONE = 0, OUT_ONLY = 1 };
 
-template <LseModeT LSE_MODE_, bool HAS_SOFTCAP_ = false>
+template <LseModeT LSE_MODE_>
 struct EpilogueAtlasA2OnlineSoftmaxT {
     static constexpr LseModeT LSE_MODE = LSE_MODE_;
-    static constexpr bool HAS_SOFTCAP = HAS_SOFTCAP_;
 };
 
 template <LseModeT LSE_MODE_>

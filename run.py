@@ -1,67 +1,129 @@
 import sys
-import argparse
 import torch
 import torch_npu
-torch_npu.npu.set_device(5)
-from flash_attn_npu import flash_attn_with_kvcache
+# torch_npu.npu.set_device(5)
+from flash_attn_npu import flash_attn_func, flash_attn_varlen_func, flash_attn_with_kvcache
 
 
-def run_test(batch, q_seqlen, kv_seqlen, head_num, kv_head, 
-             head_dim_qk, head_dim_v, dtype, causal, paged, block_size):
-    """运行 FlashAttention 测试"""
+def run_fwd():
+    """
+    标准 Flash Attention 前向推理
+    输入形状: (batch_size, seqlen, nheads, headdim)
+    """
+    batch_size, seqlen, nheads, headdim = 2, 128, 8, 64
     
-    # 参数验证
-    if head_num % kv_head != 0:
-        raise ValueError(f"head_num ({head_num}) 必须能被 kv_head ({kv_head}) 整除")
+    # 随机初始化 Q, K, V
+    q = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    k = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    v = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
     
-    # 创建输入
-    query = torch.randn(batch, q_seqlen, head_num, head_dim_qk, dtype=dtype).npu()
-    cache_seqlens = torch.full((batch,), kv_seqlen, dtype=torch.int32).npu()
-    
-    if paged:
-        # 分页缓存模式
-        num_blocks = max(10, (kv_seqlen * batch + block_size - 1) // block_size)
-        key_cache = torch.randn(num_blocks, block_size, kv_head, head_dim_qk, dtype=dtype).npu()
-        value_cache = torch.randn(num_blocks, block_size, kv_head, head_dim_v, dtype=dtype).npu()
-    else:
-        # 标准缓存模式
-        key_cache = torch.randn(batch, kv_seqlen, kv_head, head_dim_qk, dtype=dtype).npu()
-        value_cache = torch.randn(batch, kv_seqlen, kv_head, head_dim_v, dtype=dtype).npu()
-    
-    # 运行 FlashAttention
-    output = flash_attn_with_kvcache(
-        query, key_cache, value_cache,
-        cache_seqlens=cache_seqlens,
-        causal=causal
+    # 调用接口
+    output = flash_attn_func(
+        q=q,
+        k=k,
+        v=v,
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        softcap=0.0,
+        alibi_slopes=None,
+        deterministic=False,
+        return_attn_probs=False
     )
+    return output
 
+def run_varlen_fwd():
+    """
+    变长序列 Flash Attention 前向推理
+    输入形状: (total_tokens, nheads, headdim)
+    """
+    max_seqlen = 128
+    nheads, headdim = 8, 64
+    
+    # 模拟变长序列长度，例如 [100, 128]
+    seqlens = [100, 128]
+    total_tokens = sum(seqlens)
+    
+    # 构建 cu_seqlens: [0, 100, 228]
+    cu_seqlens = torch.tensor([0] + seqlens, dtype=torch.int32, device='npu')
+    
+    # 随机初始化 Q, K, V (packed format)
+    q = torch.randn(total_tokens, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    k = torch.randn(total_tokens, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    v = torch.randn(total_tokens, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    
+    output = flash_attn_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max_seqlen,
+        max_seqlen_k=max_seqlen,
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=True, # 变长通常用于解码，开启 causal
+        window_size=(-1, -1),
+        softcap=0.0,
+        alibi_slopes=None,
+        deterministic=False,
+        return_attn_probs=False
+    )
+    return output
+
+def run_kv_cache():
+    """
+    带 KV Cache 的推理模式
+    用于自回归生成，更新 cache 并计算 attention
+    """
+    batch_size, seqlen_q, nheads, headdim = 2, 1, 8, 64 # seqlen_q=1 表示单步解码
+    seqlen_k_cache = 1024 # 缓存的最大长度
+    
+    # 1. 初始化 Cache (预先分配好内存)
+    # 形状: (batch_size, max_seqlen, nheads, headdim)
+    k_cache = torch.zeros(batch_size, seqlen_k_cache, nheads, headdim, device='npu', dtype=torch.float16)
+    v_cache = torch.zeros(batch_size, seqlen_k_cache, nheads, headdim, device='npu', dtype=torch.float16)
+    
+    # 2. 初始化当前 Step 的输入
+    q = torch.randn(batch_size, seqlen_q, nheads, headdim, device='npu', dtype=torch.float16)
+    k = torch.randn(batch_size, seqlen_q, nheads, headdim, device='npu', dtype=torch.float16)
+    v = torch.randn(batch_size, seqlen_q, nheads, headdim, device='npu', dtype=torch.float16)
+    
+    # 3. 记录当前缓存的序列长度 (用于指示写入位置)
+    # 假设当前缓存里已经有 10 个 token
+    cache_seqlens = torch.tensor([10, 10], dtype=torch.int32, device='npu')
+    
+    output = flash_attn_with_kvcache(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        k=k, # 提供 k/v 会触发 inplace 更新 cache
+        v=v,
+        cache_seqlens=cache_seqlens,
+        cache_batch_idx=None,
+        cache_leftpad=None,
+        block_table=None,
+        softmax_scale=None,
+        causal=True,
+        window_size=(-1, -1),
+        softcap=0.0,
+        rotary_cos=None,
+        rotary_sin=None,
+        rotary_interleaved=True,
+        alibi_slopes=None,
+        num_splits=0,
+        return_softmax_lse=False
+    )
     return output
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FlashAttention 测试")
-
-    parser.add_argument('--batch', type=int, default=16, help='批次大小')
-    parser.add_argument('--q_seqlen', type=int, default=1024, help='Q序列长度')
-    parser.add_argument('--kv_seqlen', type=int, default=1024, help='KV序列长度')
-    parser.add_argument('--head_num', type=int, default=8, help='注意力头数')
-    parser.add_argument('--kv_head', type=int, default=1, help='KV头数')
-    parser.add_argument('--head_dim_qk', type=int, default=128, help='Q/K头维度')
-    parser.add_argument('--head_dim_v', type=int, default=128, help='V头维度')
-    parser.add_argument('--block_size', type=int, default=128, help='块大小')
-
-    parser.add_argument('--dtype', type=str, default='float16', choices=['float16', 'bfloat16'])
-    parser.add_argument('--causal', action='store_true', help='使用因果注意力')
-    parser.add_argument('--paged', action='store_true', help='使用分页缓存')
-    
-    args = parser.parse_args()
-    
-    dtype = torch.float16 if args.dtype == 'float16' else torch.bfloat16
-    
     try:
-        run_test(args.batch, args.q_seqlen, args.kv_seqlen, args.head_num, 
-                args.kv_head, args.head_dim_qk, args.head_dim_v, dtype, 
-                args.causal, args.paged, args.block_size)
+        run_fwd()
+        # run_varlen_fwd()
+        # run_kv_cache()
+        print("[SUCCESS]")
         return 0
     except Exception as e:
         print(f"[ERROR]: {e}")

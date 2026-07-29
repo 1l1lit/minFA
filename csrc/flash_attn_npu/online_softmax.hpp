@@ -20,8 +20,8 @@ using namespace AscendC;
 using namespace KernelCommon;
 
 namespace Catlass::Epilogue::Block {
-template <class OutputType_, class InputType_, class MaskType_, LseModeT LSE_MODE_, bool HAS_SOFTCAP_>
-class BlockEpilogue<EpilogueAtlasA2OnlineSoftmaxT<LSE_MODE_, HAS_SOFTCAP_>, OutputType_, InputType_, MaskType_> {
+template <class OutputType_, class InputType_, class MaskType_, LseModeT LSE_MODE_>
+class BlockEpilogue<EpilogueAtlasA2OnlineSoftmaxT<LSE_MODE_>, OutputType_, InputType_, MaskType_> {
 public:
     using ArchTag = Arch::AtlasA2;
 
@@ -40,10 +40,9 @@ public:
 
     CATLASS_DEVICE ~BlockEpilogue() = default;
 
-    CATLASS_DEVICE void init(Arch::Resource<ArchTag>& resource, float scaleVal_, float softcapVal_)
+    CATLASS_DEVICE void init(Arch::Resource<ArchTag>& resource, float scaleVal_)
     {
         scaleVal = scaleVal_;
-        softcapVal = softcapVal_;
 
         constexpr uint32_t LS_OFFSET = 0;
         constexpr uint32_t LP_OFFSET = 4 * UB_BLK_SIZE;
@@ -408,32 +407,6 @@ public:
         Muls<float, false>(
             ls[pingPongOffset], ls[pingPongOffset], scaleVal, MASK_NUL, repeatTimes, UnaryRepeatParams());
         PipeBarrier<PIPE_V>();
-
-        if constexpr (HAS_SOFTCAP_) {
-            // Clip the input to avoid overflow
-            Maxs<float, false>(
-                ls[pingPongOffset], ls[pingPongOffset], -8.8f, MASK_NUL, repeatTimes, UnaryRepeatParams());
-            PipeBarrier<PIPE_V>();
-
-            // (2 * softcap) / (1 + exp(-2x)) - softcap
-            Muls<float, false>(
-                ls[pingPongOffset], ls[pingPongOffset], -2.0f, MASK_NUL, repeatTimes, UnaryRepeatParams());
-            PipeBarrier<PIPE_V>();
-            Exp<float, false>(ls[pingPongOffset], ls[pingPongOffset], MASK_NUL, repeatTimes, UnaryRepeatParams());
-            PipeBarrier<PIPE_V>();
-            Adds<float, false>(
-                ls[pingPongOffset], ls[pingPongOffset], 1.0f, MASK_NUL, repeatTimes, UnaryRepeatParams());
-
-            Duplicate<float, false>(sc, 2.0f * softcapVal, MASK_NUL, 1, 1, 8);
-            PipeBarrier<PIPE_V>();
-            Div<float, false>(
-                ls[pingPongOffset], sc, ls[pingPongOffset], MASK_NUL, repeatTimes,
-                BinaryRepeatParams(1, 1, 1, 8, 0, 8));
-            PipeBarrier<PIPE_V>();
-            Adds<float, false>(
-                ls[pingPongOffset], ls[pingPongOffset], -softcapVal, MASK_NUL, repeatTimes, UnaryRepeatParams());
-            PipeBarrier<PIPE_V>();
-        }
     }
 
     template <bool doTriUMask>
@@ -688,7 +661,6 @@ public:
 
 private:
     float scaleVal;
-    float softcapVal;
 
     LocalTensor<float> ls;
     LocalTensor<ElementOutput> lp;

@@ -84,7 +84,6 @@ public:
         uint32_t blockSize = fATilingData->blockSize;
         uint32_t maskType = fATilingData->maskType;
         float scaleValue = fATilingData->scaleValue;
-        float softcapValue = fATilingData->softcapValue;
 
         AscendC::GlobalTensor<ElementQ> gQ;
         gQ.SetGlobalBuffer((__gm__ ElementQ*)params.q);
@@ -170,7 +169,7 @@ public:
             blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN);
             blockMmadPV.init(resource, kPVDynNum, MAX_KV_STACK_LEN, qkL1Size);
         } else { // ASCEND_IS_AIV
-            epilogueOnlineSoftmax.init(resource, scaleValue, softcapValue);
+            epilogueOnlineSoftmax.init(resource, scaleValue);
             epilogueRescaleO.init(resource);
         }
 
@@ -204,6 +203,8 @@ public:
         uint32_t totalQTokens = 0;
         if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
             totalQTokens = static_cast<uint32_t>(gActualQseqlen.GetValue(batch));
+        } else {
+            totalQTokens = static_cast<uint32_t>(gActualQseqlen.GetValue(0));
         }
 
         uint32_t coreNum = AscendC::GetBlockNum();
@@ -458,8 +459,7 @@ private:
 
 template <
     typename INPUT_DTYPE_ = half, bool PAGED_CACHE_FLAG_ = false, MaskType MASK_TYPE_ = MaskType::NO_MASK,
-    InputLayout INPUT_LAYOUT_ = InputLayout::BSND, Epilogue::LseModeT LSE_MODE_ = Epilogue::LseModeT::NONE,
-    bool HAS_SOFTCAP_ = false>
+    InputLayout INPUT_LAYOUT_ = InputLayout::BSND, Epilogue::LseModeT LSE_MODE_ = Epilogue::LseModeT::NONE>
 CATLASS_GLOBAL void FAInfer(
     uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
     GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling)
@@ -497,7 +497,7 @@ CATLASS_GLOBAL void FAInfer(
     using SType = Gemm::GemmType<ElementS, LayoutS>;
     using BlockMmadQK = Gemm::Block::BlockMmad<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, QType, KType, SType>;
 
-    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT<LSE_MODE_, HAS_SOFTCAP_>;
+    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT<LSE_MODE_>;
     using PType = Gemm::GemmType<ElementP, LayoutP>;
     using maskType = Gemm::GemmType<ElementMask, LayoutMask>;
     using EpilogueOnlineSoftmax = Epilogue::Block::BlockEpilogue<DispatchPolicyOnlineSoftmax, PType, SType, maskType>;
