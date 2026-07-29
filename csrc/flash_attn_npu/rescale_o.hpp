@@ -48,7 +48,6 @@ public:
         constexpr uint32_t GO_OFFSET = 8 * UB_BLK_SIZE;
 
         constexpr uint32_t TV_OFFSET = 10 * UB_BLK_SIZE;
-        constexpr uint32_t HM_OFFSET = 10 * UB_BLK_SIZE + 9 * UB_VEC_SIZE;
         constexpr uint32_t GM_OFFSET = 10 * UB_BLK_SIZE + 10 * UB_VEC_SIZE;
         constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + 12 * UB_VEC_SIZE;
         constexpr uint32_t LSE_OFFSET = 10 * UB_BLK_SIZE + 12 * UB_VEC_SIZE;
@@ -58,7 +57,6 @@ public:
         go16 = resource.ubBuf.template GetBufferByByte<ElementOutput>(GO_OFFSET);
         go32 = resource.ubBuf.template GetBufferByByte<float>(GO_OFFSET);
         tv = resource.ubBuf.template GetBufferByByte<float>(TV_OFFSET);
-        hm = resource.ubBuf.template GetBufferByByte<float>(HM_OFFSET);
         gm = resource.ubBuf.template GetBufferByByte<float>(GM_OFFSET);
         gl = resource.ubBuf.template GetBufferByByte<float>(GL_OFFSET);
         lse = resource.ubBuf.template GetBufferByByte<float>(LSE_OFFSET);
@@ -218,14 +216,16 @@ public:
                     WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
 
                     if (qNThisSubBlock == 0) {
-                        DataCopyPad(
-                            gLse, tv,
-                            DataCopyExtParams(totalRowNum, sizeof(float), 0, (qHeads - 1) * sizeof(float), 0));
+                        // single head: its tokens are contiguous in BNS/NT -> plain lse32 burst.
+                        DataCopyPad(gLse, lse, DataCopyExtParams(1, totalRowNum * sizeof(float), 0, 0, 0));
                     } else {
-                        for (uint32_t qNIdx = 0; qNIdx < qNThisSubBlock; qNIdx++) {
+                        // multi-head: per-token gather (srcStride) + scatter (dstStride).
+                        for (uint32_t qSIdx = 0; qSIdx < qSBlockSize; qSIdx++) {
                             DataCopyPad(
-                                gLse[qNIdx], tv[qNIdx * qSBlockSize * DATABLOCK_PER_REPEAT],
-                                DataCopyExtParams(qSBlockSize, sizeof(float), 0, (qHeads - 1) * sizeof(float), 0));
+                                gLse[qSIdx], tv[qSIdx * DATABLOCK_PER_REPEAT],
+                                DataCopyExtParams(
+                                    qNThisSubBlock, sizeof(float), qSBlockSize - 1,
+                                    (layoutLse.stride(0) - 1) * sizeof(float), 0));
                         }
                     }
                     SetFlag<HardEvent::MTE3_V>(EVENT_ID4);
@@ -266,8 +266,8 @@ public:
         int64_t outOffsetSubBlock =
             layoutOutput.GetOffset(MatrixCoord(outRowOffsetThisSubBlock, outColOffsetThisSubBlock));
 
-        uint32_t outLseRowOffsetThisSubBlock = (qNBlockSize == 1) ? inRowOffsetThisSubBlock : 0;
-        uint32_t outLseColOffsetThisSubBlock = (qNBlockSize == 1) ? 0 : subcoreIdx * qNSplitSubBlock;
+        uint32_t outLseRowOffsetThisSubBlock = (qNBlockSize == 1) ? 0 : subcoreIdx * qNSplitSubBlock;
+        uint32_t outLseColOffsetThisSubBlock = (qNBlockSize == 1) ? inRowOffsetThisSubBlock : 0;
         int64_t offsetLse = layoutLse.GetOffset(MatrixCoord(outLseRowOffsetThisSubBlock, outLseColOffsetThisSubBlock));
         auto gLseThisSubBlock = gLse[offsetLse];
         auto layoutOutLseThisSubBlock = layoutLse;
@@ -319,7 +319,6 @@ public:
 private:
     LocalTensor<float> lo;
     LocalTensor<float> dm;
-    LocalTensor<float> hm;
     LocalTensor<float> gl;
     LocalTensor<float> tv;
     LocalTensor<ElementOutput> go16;

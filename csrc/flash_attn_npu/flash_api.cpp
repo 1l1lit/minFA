@@ -73,7 +73,7 @@ std::vector<at::Tensor> mha_fwd(
 
     // init softmax lse
     at::Tensor softmax_lse =
-        at::empty({batch_size, seqlen_q, num_heads}, at::device(at::kPrivateUse1).dtype(at::kFloat));
+        at::empty({batch_size, num_heads, seqlen_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
     softmax_lse.fill_(std::numeric_limits<float>::infinity());
     auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmax_lse.data_ptr()));
 
@@ -229,7 +229,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     }
 
     const auto sizes = q.sizes();
-    int T = sizes[0];
+    int total_q = sizes[0];
     int num_heads = sizes[1];
     const int head_size_og = sizes[2];
     const int batch_size = cu_seqlens_q.numel() - 1;
@@ -263,7 +263,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
-    at::Tensor softmax_lse = at::empty({T, num_heads}, at::device(at::kPrivateUse1).dtype(at::kFloat)); // lse
+    at::Tensor softmax_lse = at::empty({num_heads, total_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
     softmax_lse.fill_(std::numeric_limits<float>::infinity());
 
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
@@ -496,7 +496,7 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
     at::Tensor softmax_lse =
-        at::empty({batch_size, seqlen_q, num_heads}, at::device(at::kPrivateUse1).dtype(at::kFloat));
+        at::empty({batch_size, num_heads, seqlen_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
     softmax_lse.fill_(std::numeric_limits<float>::infinity());
 
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);

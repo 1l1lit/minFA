@@ -203,7 +203,7 @@ public:
         uint32_t totalQTokens = 0;
         if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
             totalQTokens = static_cast<uint32_t>(gActualQseqlen.GetValue(batch));
-        } else {
+        } else { // Token per batch for BSND
             totalQTokens = static_cast<uint32_t>(gActualQseqlen.GetValue(0));
         }
 
@@ -226,7 +226,12 @@ public:
                         blockBOffset += static_cast<uint64_t>(maxNumBlocksPerBatch);
                     }
                     oBOffset += static_cast<uint64_t>(qSeqlen * strideO);
-                    lseBOffset += static_cast<uint64_t>(qSeqlen * qHeads);
+                    // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
+                    if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
+                        lseBOffset += static_cast<uint64_t>(qSeqlen);
+                    } else {
+                        lseBOffset += static_cast<uint64_t>(qSeqlen * qHeads);
+                    }
                 }
 
                 qSeqlen = fATilingData->maxQSeqlen;
@@ -273,9 +278,9 @@ public:
                                  static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideO + // S 偏移
                                  static_cast<uint64_t>(qNStartIdx * embedV);                    // N 偏移
 
-            uint64_t gmOffsetLse = lseBOffset + static_cast<uint64_t>( // B 偏移
-                                       qSBlockIdx * curQSBlockTile * qHeads + // S 偏移
-                                       qNStartIdx);     // N 偏移
+            uint64_t gmOffsetLse = lseBOffset +                                        // B 偏移
+                                   static_cast<uint64_t>(qNStartIdx * totalQTokens) +  // N 偏移
+                                   static_cast<uint64_t>(qSBlockIdx * curQSBlockTile); // S 偏移
 
             uint32_t qSBlockSize = (qSBlockIdx == curQSBlockNum - 1) // 处理尾块
                                        ? (qSeqlen - qSBlockIdx * curQSBlockTile)
@@ -388,7 +393,7 @@ public:
                     } else { // ASCEND_IS_AIV
                         LayoutO layoutO(qSeqlen, qHeads * embed);
                         LayoutUpdate layoutUpdate(rowNum, embed, embedRound);
-                        LayoutLse layoutLse(totalQTokens, qHeads);
+                        LayoutLse layoutLse(qHeads, totalQTokens);
                         uint64_t gmOffsetUpdate = static_cast<uint64_t>(coreIdx * WORKSPACE_BLOCK_SIZE_DB);
 
                         Arch::CrossCoreWaitFlag(pvReady);
