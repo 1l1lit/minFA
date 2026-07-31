@@ -64,7 +64,7 @@ public:
     }
 
     CATLASS_DEVICE void CopyOToGm(
-        GlobalTensor<ElementOutput> gOutput, uint32_t proTokenIdx, uint32_t proTokenNum, uint32_t epiTokenNum,
+        const GlobalTensor<ElementOutput>& gOutput, uint32_t proTokenIdx, uint32_t proTokenNum, uint32_t epiTokenNum,
         uint32_t integralHeadNum, uint32_t qSThisSubBlock, uint32_t embed, uint32_t oHiddenSize)
     {
         uint32_t blockLen = embed * sizeof(half);
@@ -97,12 +97,13 @@ public:
     }
 
     CATLASS_DEVICE void SubCoreCompute(
-        GlobalTensor<ElementOutput> gOutput, GlobalTensor<ElementInput> gInput, GlobalTensor<ElementUpdate> gUpdate,
-        GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput, const LayoutInput& layoutInput,
-        const LayoutUpdate& layoutUpdate, const LayoutLse& layoutLse, uint32_t qNThisSubBlock, uint32_t qSThisSubBlock,
-        uint32_t totalRowNum, uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
-        uint32_t needRowLoop, uint32_t isLastRowLoop, uint32_t rowOffsetLoop, uint32_t proTokenIdx,
-        uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum)
+        const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
+        const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
+        const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
+        const LayoutLse& layoutLse, uint32_t qNThisSubBlock, uint32_t qSThisSubBlock, uint32_t totalRowNum,
+        uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod, uint32_t needRowLoop,
+        uint32_t isLastRowLoop, uint32_t rowOffsetLoop, uint32_t proTokenIdx, uint32_t proTokenNum,
+        uint32_t epiTokenNum, uint32_t integralHeadNum)
     {
         uint32_t curRowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -240,10 +241,11 @@ public:
     }
 
     CATLASS_DEVICE void operator()(
-        GlobalTensor<ElementOutput> gOutput, GlobalTensor<ElementInput> gInput, GlobalTensor<ElementUpdate> gUpdate,
-        GlobalTensor<ElementLse> gLse, const LayoutOutput& layoutOutput, const LayoutInput& layoutInput,
-        const LayoutUpdate& layoutUpdate, const LayoutLse& layoutLse, GemmCoord actualBlockShape, uint32_t qSBlockSize,
-        uint32_t qNBlockSize, uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod)
+        const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
+        const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
+        const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
+        const LayoutLse& layoutLse, GemmCoord actualBlockShape, uint32_t qSBlockSize, uint32_t qNBlockSize,
+        uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();

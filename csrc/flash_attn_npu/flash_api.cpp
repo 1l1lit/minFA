@@ -33,7 +33,6 @@ std::vector<at::Tensor> mha_fwd(
     TORCH_CHECK(!alibi_slopes_.has_value(), "NPU FlashAttention does not support alibi_slopes.");
     TORCH_CHECK(p_dropout == 0.0, "NPU FlashAttention does not support dropout.");
     TORCH_CHECK(softcap == 0.0, "NPU FlashAttention does not support softcap.");
-    TORCH_CHECK(!return_softmax, "NPU FlashAttention does not support return_softmax.");
     TORCH_CHECK(window_size_left == -1, "NPU FlashAttention does not support window_size_left.");
     TORCH_CHECK(window_size_right == -1, "NPU FlashAttention does not support window_size_right.");
 
@@ -57,18 +56,18 @@ std::vector<at::Tensor> mha_fwd(
     auto opts = q.options().device(at::kPrivateUse1);
     auto p = torch::empty({0}, opts);
     if (return_softmax) {
-        p = torch::empty({batch_size, num_heads, seqlen_q, seqlen_k}, opts);
+        p = torch::zeros({batch_size, num_heads, seqlen_q, seqlen_k}, opts);
     }
     auto rng_state = torch::empty({2}, opts.dtype(torch::kInt64));
 
     // init mask
-    at::Tensor mask_gpu_tensor;
+    at::Tensor mask_npu_tensor;
     uint8_t* maskDevice = nullptr;
     if (is_causal) {
         at::Tensor mask_cpu_tensor = at::empty({2048, 2048}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
-        mask_gpu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
-        maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_gpu_tensor.data_ptr()));
+        mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
+        maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
     }
 
     // init softmax lse
@@ -107,6 +106,7 @@ std::vector<at::Tensor> mha_fwd(
     tiling_cpu_ptr->set_maskType(static_cast<uint32_t>(is_causal));
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
     tiling_cpu_ptr->set_maxQSeqlen(seqlen_q);
+    tiling_cpu_ptr->set_maxKvSeqlen(seqlen_k);
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
@@ -117,13 +117,14 @@ std::vector<at::Tensor> mha_fwd(
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
     auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
     auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
-    at::Tensor seqlenq_gpu_tensor = at::full({batch_size}, seqlen_q).to(at::Device(at::kPrivateUse1)).to(at::kInt);
-    at::Tensor seqlenk_gpu_tensor = at::full({batch_size}, seqlen_k).to(at::Device(at::kPrivateUse1)).to(at::kInt);
-    at::Tensor tiling_gpu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
-    auto qSeqDevice = static_cast<uint8_t*>(const_cast<void*>(seqlenq_gpu_tensor.data_ptr()));
-    auto kvSeqDevice = static_cast<uint8_t*>(const_cast<void*>(seqlenk_gpu_tensor.data_ptr()));
+    uint8_t* pDevice = return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr;
+    at::Tensor seqlenq_npu_tensor = at::full({batch_size}, seqlen_q).to(at::Device(at::kPrivateUse1)).to(at::kInt);
+    at::Tensor seqlenk_npu_tensor = at::full({batch_size}, seqlen_k).to(at::Device(at::kPrivateUse1)).to(at::kInt);
+    at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
+    auto qSeqDevice = static_cast<uint8_t*>(const_cast<void*>(seqlenq_npu_tensor.data_ptr()));
+    auto kvSeqDevice = static_cast<uint8_t*>(const_cast<void*>(seqlenk_npu_tensor.data_ptr()));
     auto workspaceDevice = static_cast<uint8_t*>(const_cast<void*>(workspace_tensor.data_ptr()));
-    auto tilingDevice = static_cast<uint8_t*>(const_cast<void*>(tiling_gpu_tensor.data_ptr()));
+    auto tilingDevice = static_cast<uint8_t*>(const_cast<void*>(tiling_npu_tensor.data_ptr()));
     auto oDevice = static_cast<uint8_t*>(const_cast<void*>(out.data_ptr()));
     uint8_t* blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
 
@@ -131,30 +132,27 @@ std::vector<at::Tensor> mha_fwd(
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
     if (is_bf16) {
         if (is_causal) {
-            SplitFuse::FAInfer<
-                bfloat16_t, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+            FAInfer<bfloat16_t, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                 <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                    qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
         } else {
-            SplitFuse::FAInfer<
-                bfloat16_t, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+            FAInfer<bfloat16_t, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                 <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                    qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
         }
     } else {
         if (is_causal) {
-            SplitFuse::FAInfer<
-                half, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+            FAInfer<half, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                 <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                    qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
         } else {
-            SplitFuse::FAInfer<half, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+            FAInfer<half, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                 <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                    qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
         }
     }
 
@@ -197,7 +195,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(p_dropout == 0.0, "NPU FlashAttention does not support dropout.");
     TORCH_CHECK(!zero_tensors, "NPU FlashAttention does not support zero_tensors.");
     TORCH_CHECK(softcap == 0.0, "NPU FlashAttention does not support softcap.");
-    TORCH_CHECK(!return_softmax, "NPU FlashAttention does not support return_softmax.");
     TORCH_CHECK(window_size_left == -1, "NPU FlashAttention does not support window_size_left.");
     TORCH_CHECK(window_size_right == -1, "NPU FlashAttention does not support window_size_right.");
     TORCH_CHECK(k.dtype() == q.dtype(), "query and key must have the same dtype");
@@ -205,13 +202,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
-
-    at::Tensor out;
-    if (out_.has_value()) {
-        out = out_.value();
-    } else {
-        out = torch::empty_like(q);
-    }
 
     at::Tensor seqlens_k, leftpad_k, alibi_slopes, block_table;
     if (seqused_k_.has_value()) {
@@ -242,6 +232,14 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(head_size_og <= 256, "FlashAttention only supports head dimension at most 256");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
+    at::Tensor out = (out_.has_value()) ? out_.value() : torch::empty_like(q);
+    auto opts = q.options().device(at::kPrivateUse1);
+    auto p = torch::empty({0}, opts);
+    if (return_softmax) {
+        p = torch::zeros({batch_size, num_heads, max_seqlen_q, max_seqlen_k}, opts);
+    }
+    auto rng_state = torch::empty({2}, opts.dtype(torch::kInt64));
+
     tiling_cpu_ptr->set_batch(static_cast<uint32_t>(batch_size));
     tiling_cpu_ptr->set_numHeads(static_cast<uint32_t>(num_heads));
     tiling_cpu_ptr->set_kvHeads(static_cast<uint32_t>(num_heads_k));
@@ -253,6 +251,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     tiling_cpu_ptr->set_maskType(static_cast<uint32_t>(is_causal));
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
     tiling_cpu_ptr->set_maxQSeqlen(max_seqlen_q);
+    tiling_cpu_ptr->set_maxKvSeqlen(max_seqlen_k);
 
     uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
     uint64_t PRE_LAUNCH = KernelCommon::PRE_LAUNCH;
@@ -272,14 +271,14 @@ std::vector<at::Tensor> mha_varlen_fwd(
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
     tiling_cpu_ptr->set_workspaceSize(workspaceSize);
 
-    at::Tensor tiling_gpu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1)); // Tiling to Device
+    at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1)); // Tiling to Device
 
     // attention mask
-    at::Tensor mask_gpu_tensor;
+    at::Tensor mask_npu_tensor;
     if (is_causal) {
         at::Tensor mask_cpu_tensor = at::empty({2048, 2048}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
-        mask_gpu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
+        mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
     }
 
     uint64_t fftsAddr = 0;
@@ -288,6 +287,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
     auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
     auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
+    uint8_t* pDevice = return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr;
 
     uint8_t* blockTableDevice = nullptr;
     uint8_t* maskDevice = nullptr;
@@ -295,81 +295,72 @@ std::vector<at::Tensor> mha_varlen_fwd(
         blockTableDevice = static_cast<uint8_t*>(const_cast<void*>(block_table.data_ptr()));
     }
     if (is_causal) {
-        maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_gpu_tensor.data_ptr()));
+        maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
     }
 
     auto oDevice = static_cast<uint8_t*>(const_cast<void*>(out.data_ptr()));
     auto qSeqDevice = static_cast<uint8_t*>(const_cast<void*>(cu_seqlens_q.data_ptr()));
     auto kvSeqDevice = static_cast<uint8_t*>(const_cast<void*>(cu_seqlens_k.data_ptr()));
     auto workspaceDevice = static_cast<uint8_t*>(const_cast<void*>(workspace_tensor.data_ptr()));
-    auto tilingDevice = static_cast<uint8_t*>(const_cast<void*>(tiling_gpu_tensor.data_ptr()));
+    auto tilingDevice = static_cast<uint8_t*>(const_cast<void*>(tiling_npu_tensor.data_ptr()));
     auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmax_lse.data_ptr()));
 
     if (is_bf16) {
         if (paged_KV) {
             if (is_causal) {
-                SplitFuse::FAInfer<
+                FAInfer<
                     bfloat16_t, true, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    bfloat16_t, true, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<bfloat16_t, true, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         } else {
             if (is_causal) {
-                SplitFuse::FAInfer<
+                FAInfer<
                     bfloat16_t, false, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    bfloat16_t, false, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<bfloat16_t, false, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         }
     } else {
         if (paged_KV) {
             if (is_causal) {
-                SplitFuse::FAInfer<
-                    half, true, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, true, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    half, true, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, true, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         } else {
             if (is_causal) {
-                SplitFuse::FAInfer<
-                    half, false, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, false, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    half, false, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, false, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         }
     }
 
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(at::Device(at::kPrivateUse1));
-    at::Tensor rng_state = torch::empty({2}, options.dtype(torch::kInt64));
-    at::Tensor p = torch::empty({0}, options.dtype(torch::kInt64));
     return {out, softmax_lse, p, rng_state};
 }
 
@@ -505,91 +496,87 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
     tiling_cpu_ptr->set_workspaceSize(workspaceSize);
 
-    at::Tensor mask_gpu_tensor;
+    at::Tensor mask_npu_tensor;
     if (is_causal) {
         at::Tensor mask_cpu_tensor = at::empty({2048, 2048}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
-        mask_gpu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
+        mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
     }
-    at::Tensor tiling_gpu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
+    at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
     uint64_t fftsAddr = 0;
     uint32_t fftsLen = 0;
     rtError_t error = rtGetC2cCtrlAddr(&fftsAddr, &fftsLen);
     auto qDevice = static_cast<uint8_t*>(q.data_ptr());
     auto kDevice = static_cast<uint8_t*>(kcache.data_ptr());
     auto vDevice = static_cast<uint8_t*>(vcache.data_ptr());
+    uint8_t* pDevice = nullptr;
     uint8_t* blockTableDevice = nullptr;
     uint8_t* maskDevice = nullptr;
     if (paged_KV) {
         blockTableDevice = static_cast<uint8_t*>(block_table.data_ptr());
     }
     if (is_causal) {
-        maskDevice = static_cast<uint8_t*>(mask_gpu_tensor.data_ptr());
+        maskDevice = static_cast<uint8_t*>(mask_npu_tensor.data_ptr());
     }
     auto oDevice = static_cast<uint8_t*>(out.data_ptr());
     auto qSeqDevice = static_cast<uint8_t*>(seqlens_k.data_ptr());
     auto kvSeqDevice = static_cast<uint8_t*>(seqlens_k.data_ptr());
     auto workspaceDevice = static_cast<uint8_t*>(workspace_tensor.data_ptr());
-    auto tilingDevice = static_cast<uint8_t*>(tiling_gpu_tensor.data_ptr());
+    auto tilingDevice = static_cast<uint8_t*>(tiling_npu_tensor.data_ptr());
     auto softmaxLseDevice = static_cast<uint8_t*>(softmax_lse.data_ptr());
+
     if (is_bf16) {
         if (paged_KV) {
             if (is_causal) {
-                SplitFuse::FAInfer<
+                FAInfer<
                     bfloat16_t, true, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    bfloat16_t, true, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<bfloat16_t, true, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         } else {
             if (is_causal) {
-                SplitFuse::FAInfer<
+                FAInfer<
                     bfloat16_t, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    bfloat16_t, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<bfloat16_t, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         }
     } else {
         if (paged_KV) {
             if (is_causal) {
-                SplitFuse::FAInfer<
-                    half, true, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, true, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    half, true, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, true, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         } else {
             if (is_causal) {
-                SplitFuse::FAInfer<
-                    half, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             } else {
-                SplitFuse::FAInfer<
-                    half, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
+                FAInfer<half, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
                     <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice,
-                        qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
+                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
             }
         }
     }

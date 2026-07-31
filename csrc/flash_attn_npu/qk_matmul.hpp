@@ -93,7 +93,7 @@ public:
     }
 
     CATLASS_DEVICE void loadQGM(
-        AscendC::GlobalTensor<ElementA> gA, LayoutA layoutA, uint32_t qSBlockSize, uint32_t qNBlockSize,
+        const AscendC::GlobalTensor<ElementA>& gA, const LayoutA& layoutA, uint32_t qSBlockSize, uint32_t qNBlockSize,
         uint32_t qHeads)
     {
         // Q: (S * N, D)
@@ -120,9 +120,9 @@ public:
     }
 
     CATLASS_DEVICE void operator()(
-        AscendC::GlobalTensor<ElementB> gB, AscendC::GlobalTensor<ElementC> gC,
-        AscendC::GlobalTensor<int32_t> gBlockTable, LayoutB layoutB, LayoutC layoutC, GemmCoord actualOriShape,
-        uint32_t nIdx, uint32_t blockSize, uint32_t strideK)
+        const AscendC::GlobalTensor<ElementB>& gB, const AscendC::GlobalTensor<ElementC>& gC,
+        const AscendC::GlobalTensor<int32_t>& gBlockTable, const LayoutB& layoutB, const LayoutC& layoutC,
+        GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideK)
     {
         uint32_t rowNum = actualOriShape.m();
         uint32_t stackSeqTile = actualOriShape.n();

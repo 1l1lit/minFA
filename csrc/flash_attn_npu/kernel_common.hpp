@@ -47,6 +47,7 @@ enum class InputLayout : uint32_t { BSND = 0, TND = 1 };
 struct FAIKernelParams {
     GM_ADDR q;
     GM_ADDR k;
+    GM_ADDR p;
     GM_ADDR v;
     GM_ADDR mask;
     GM_ADDR blockTable;
@@ -56,25 +57,6 @@ struct FAIKernelParams {
     GM_ADDR lse;
     GM_ADDR workSpace;
     GM_ADDR tiling;
-
-    CATLASS_DEVICE FAIKernelParams() = default;
-
-    CATLASS_DEVICE FAIKernelParams(
-        GM_ADDR q_, GM_ADDR k_, GM_ADDR v_, GM_ADDR mask_, GM_ADDR blockTable_, GM_ADDR actualQseqlen_,
-        GM_ADDR actualKvseqlen_, GM_ADDR o_, GM_ADDR lse_, GM_ADDR workSpace_, GM_ADDR tiling_)
-        : q(q_),
-          k(k_),
-          v(v_),
-          mask(mask_),
-          blockTable(blockTable_),
-          actualQseqlen(actualQseqlen_),
-          actualKvseqlen(actualKvseqlen_),
-          o(o_),
-          lse(lse_),
-          workSpace(workSpace_),
-          tiling(tiling_)
-    {
-    }
 };
 
 // 获取 Q 的 N（注意力头）维分块大小

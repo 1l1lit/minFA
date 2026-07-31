@@ -302,7 +302,7 @@ public:
     }
 
     CATLASS_DEVICE void CopyMaskToUb(
-        GlobalTensor<ElementMask> gMask, uint32_t colNum, uint32_t colNumRound, uint32_t maskStride,
+        const GlobalTensor<ElementMask>& gMask, uint32_t colNum, uint32_t colNumRound, uint32_t maskStride,
         uint32_t tokenNumPerHead, uint32_t proTokenIdx, uint32_t proTokenNum, uint32_t integralHeadNum,
         uint32_t epiTokenNum)
     {
@@ -409,11 +409,32 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
+    CATLASS_DEVICE void CopyPToGM(
+        const GlobalTensor<ElementOutput>& gP, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound, uint32_t sOffset,
+        uint32_t qSBlockSize, uint32_t maxKvSeqlen, uint64_t strideP)
+    {
+        uint32_t rowsDone = 0;
+        uint64_t nOffset = 0;
+        while (rowsDone < rowNum) {
+            uint32_t rowsCurHead = Min(rowNum - rowsDone, qSBlockSize - sOffset);
+            for (uint32_t r = 0; r < rowsCurHead; r++) {
+                DataCopyPad(
+                    gP[nOffset + static_cast<uint64_t>((sOffset + r) * maxKvSeqlen)],
+                    lp[pingPongOffset][(rowsDone + r) * colNumRound],
+                    DataCopyExtParams(1, colNum * sizeof(ElementOutput), 0, 0, 0));
+            }
+            rowsDone += rowsCurHead;
+            sOffset = 0;
+            nOffset += strideP;
+        }
+    }
+
     template <bool doTriUMask>
     CATLASS_DEVICE void SubCoreCompute(
-        GlobalTensor<ElementOutput> gOutput, const LayoutOutput& layoutOutput, uint32_t coreRowOffset,
-        uint32_t isFirstStackTile, uint32_t isLastNoMaskStackTile, uint32_t isFirstRowLoop, uint32_t isLastRowLoop,
-        uint32_t colNumRound, uint32_t curStackTileMod)
+        const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementOutput>& gP, uint64_t gmOffsetP,
+        const LayoutOutput& layoutOutput, uint32_t coreRowOffset, uint32_t isFirstStackTile,
+        uint32_t isLastNoMaskStackTile, uint32_t isFirstRowLoop, uint32_t isLastRowLoop, uint32_t colNumRound,
+        uint32_t curStackTileMod, uint32_t gRowOffset, uint32_t qSBlockSize, uint32_t maxKvSeqlen, uint64_t strideP)
     {
         uint32_t rowNumLoop = layoutOutput.shape(0);
         uint32_t rowNumLoopRound = RoundUp(rowNumLoop, DATABLOCK_PER_REPEAT);
@@ -452,6 +473,13 @@ public:
             gOutput, lp[pingPongOffset],
             DataCopyParams(rowNumLoop, colNumRound / BLOCK_SIZE, 0, (colNumPad - colNumRound) / BLOCK_SIZE));
 
+        if (gP.GetPhyAddr()) {
+            uint64_t nOffset = static_cast<uint64_t>(gRowOffset / qSBlockSize) * strideP;
+            uint32_t sOffset = gRowOffset % qSBlockSize;
+            CopyPToGM(
+                gP[gmOffsetP + nOffset], rowNumLoop, colNum, colNumRound, sOffset, qSBlockSize, maxKvSeqlen, strideP);
+        }
+
         if constexpr (!doTriUMask) {
             SetFlag<HardEvent::MTE3_V>(pingPong);
             if (isLastNoMaskStackTile && isLastRowLoop) {
@@ -466,9 +494,11 @@ public:
     }
 
     CATLASS_DEVICE void operator()(
-        GlobalTensor<ElementOutput> gOutput, GlobalTensor<ElementInput> gInput, const LayoutOutput& layoutOutput,
+        const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
+        const GlobalTensor<ElementOutput>& gP, uint64_t gmOffsetP, const LayoutOutput& layoutOutput,
         const LayoutInput& layoutInput, GemmCoord actualBlockShape, uint32_t isFirstStackTile,
-        uint32_t isLastNoMaskStackTile, uint32_t curStackTileMod)
+        uint32_t isLastNoMaskStackTile, uint32_t curStackTileMod, uint32_t qSBlockSize, uint32_t maxKvSeqlen,
+        uint64_t strideP)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t colNum = actualBlockShape.n();
@@ -511,19 +541,21 @@ public:
                 ScaleS(rowNumLoop, colNumRound);
 
                 SubCoreCompute<false>(
-                    gOutput[layoutOutput.GetOffset(MatrixCoord(gRowOffset, 0))],
+                    gOutput[layoutOutput.GetOffset(MatrixCoord(gRowOffset, 0))], gP, gmOffsetP,
                     layoutOutput.GetTileLayout(MatrixCoord(rowNumLoop, colNum)), rowOffset, isFirstStackTile,
-                    isLastNoMaskStackTile, (nowRowIdx == 0), (nowRowIdx == rowLoop - 1), colNumRound, curStackTileMod);
+                    isLastNoMaskStackTile, (nowRowIdx == 0), (nowRowIdx == rowLoop - 1), colNumRound, curStackTileMod,
+                    gRowOffset, qSBlockSize, maxKvSeqlen, strideP);
             }
         }
     }
 
     CATLASS_DEVICE void operator()(
-        GlobalTensor<ElementOutput> gOutput, GlobalTensor<ElementInput> gInput, GlobalTensor<ElementMask> gMask,
+        const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
+        const GlobalTensor<ElementMask>& gMask, const GlobalTensor<ElementOutput>& gP, uint64_t gmOffsetP,
         const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutInput& layoutMask,
         GemmCoord actualBlockShape, uint32_t isFirstStackTile, uint32_t qSBlockSize, uint32_t qNBlockSize,
         uint32_t curStackTileMod, Arch::CrossCoreFlag qkReady, uint32_t triUp, uint32_t triDown, uint32_t kvSStartIdx,
-        uint32_t kvSEndIdx)
+        uint32_t kvSEndIdx, uint32_t maxKvSeqlen, uint64_t strideP)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t colNum = actualBlockShape.n();
@@ -652,9 +684,10 @@ public:
                 // online softmax vectorized compute
                 uint32_t gRowOffset = rowOffset + coreRowOffset;
                 SubCoreCompute<true>(
-                    gOutput[layoutOutput.GetOffset(MatrixCoord(gRowOffset, 0))],
+                    gOutput[layoutOutput.GetOffset(MatrixCoord(gRowOffset, 0))], gP, gmOffsetP,
                     layoutOutput.GetTileLayout(MatrixCoord(rowNumLoop, colNum)), rowOffset, isFirstStackTile, 0,
-                    (nowRowIdx == 0), (nowRowIdx == rowLoop - 1), colNumRound, curStackTileMod);
+                    (nowRowIdx == 0), (nowRowIdx == rowLoop - 1), colNumRound, curStackTileMod, gRowOffset, qSBlockSize,
+                    maxKvSeqlen, strideP);
             }
         }
     }

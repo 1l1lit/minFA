@@ -10,7 +10,7 @@ def run_fwd():
     标准 Flash Attention 前向推理
     输入形状: (batch_size, seqlen, nheads, headdim)
     """
-    batch_size, seqlen, nheads, headdim = 2, 128, 8, 64
+    batch_size, seqlen, nheads, headdim = 1, 513, 1, 128
     
     # 随机初始化 Q, K, V
     q = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
@@ -123,7 +123,6 @@ def main():
         run_fwd()
         # run_varlen_fwd()
         # run_kv_cache()
-        print("[SUCCESS]")
         return 0
     except Exception as e:
         print(f"[ERROR]: {e}")

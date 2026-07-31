@@ -93,9 +93,10 @@ public:
     }
 
     CATLASS_DEVICE void operator()(
-        AscendC::GlobalTensor<ElementA> gA, AscendC::GlobalTensor<ElementB> gB, AscendC::GlobalTensor<ElementC> gC,
-        AscendC::GlobalTensor<int32_t> gBlockTable, LayoutA layoutA, LayoutB layoutB, LayoutC layoutC,
-        GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideV, Arch::CrossCoreFlag softmaxReady)
+        const AscendC::GlobalTensor<ElementA>& gA, const AscendC::GlobalTensor<ElementB>& gB,
+        const AscendC::GlobalTensor<ElementC>& gC, const AscendC::GlobalTensor<int32_t>& gBlockTable,
+        const LayoutA& layoutA, const LayoutB& layoutB, const LayoutC& layoutC, GemmCoord actualOriShape, uint32_t nIdx,
+        uint32_t blockSize, uint32_t strideV, Arch::CrossCoreFlag softmaxReady)
     {
         uint32_t rowNum = actualOriShape.m();
         uint32_t embed = actualOriShape.n();
@@ -221,10 +222,10 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong);
                         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong + 2);
 
-                        l0ABPingPong ^= 1;;
+                        l0ABPingPong ^= 1;
                     }
 
-                    l1APingPong ^= 1;;
+                    l1APingPong ^= 1;
                 }
 
                 // 等待 M 计算完成，再进行 L0C -> GM 搬运
@@ -239,7 +240,7 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::FIX_M>(
                     l0CPingPong); // 通知 L0C -> GM 搬运完成，可以进行下一轮 M 计算
 
-                l0CPingPong ^= 1;;
+                l0CPingPong ^= 1;
             }
         }
 

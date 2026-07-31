@@ -97,10 +97,7 @@ def _flash_attn_forward_fake(
     softmax_lse = torch.empty((batch_size, num_heads, seqlen_q), dtype=torch.float32, device=q.device, layout=q.layout)
     p = torch.empty((0,), dtype=q.dtype, device=q.device, layout=q.layout)
     if return_softmax:
-        if torch.cuda.is_available() and torch.version.hip:
-            p = torch.empty((batch_size, num_heads, seqlen_q, seqlen_k), dtype=q.dtype, device=q.device, layout=q.layout)
-        else:
-            p = torch.empty((batch_size, num_heads, round_multiple(seqlen_q, 128), round_multiple(seqlen_k, 128)), dtype=q.dtype, device=q.device, layout=q.layout)
+        p = torch.empty((batch_size, num_heads, seqlen_q, seqlen_k), dtype=q.dtype, device=q.device, layout=q.layout)
     rng_state = torch.empty((2,), dtype=torch.int64, device=q.device)
 
     return out, softmax_lse, p, rng_state
@@ -191,10 +188,7 @@ def _flash_attn_varlen_forward_fake(
     softmax_lse = torch.empty((num_heads, total_q), dtype=torch.float32, device=q.device, layout=q.layout)
     p = torch.empty((0,), dtype=q.dtype, device=q.device, layout=q.layout)
     if return_softmax:
-        if torch.cuda.is_available() and torch.version.hip:
-            p = torch.empty((batch_size, num_heads, max_seqlen_q, max_seqlen_k), dtype=q.dtype, device=q.device, layout=q.layout)
-        else:
-            p = torch.empty((batch_size, num_heads, round_multiple(max_seqlen_q, 128), round_multiple(max_seqlen_k, 128)), dtype=q.dtype, device=q.device, layout=q.layout)
+        p = torch.empty((batch_size, num_heads, max_seqlen_q, max_seqlen_k), dtype=q.dtype, device=q.device, layout=q.layout)
     rng_state = torch.empty((2,), dtype=torch.int64, device=q.device)
     return out, softmax_lse, p, rng_state
 
@@ -439,7 +433,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             window_size_right=window_size[1],
             softcap=softcap,
             alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
+            return_softmax=return_softmax,
         )
         if is_grad:
             ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
@@ -527,7 +521,7 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             window_size_right=window_size[1],
             softcap=softcap,
             alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
+            return_softmax=return_softmax,
             block_table=None,
         )
         if is_grad:
@@ -618,7 +612,7 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             window_size_right=window_size[1],
             softcap=softcap,
             alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
+            return_softmax=return_softmax,
         )
         if is_grad:
             ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
@@ -713,7 +707,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             window_size_right=window_size[1],
             softcap=softcap,
             alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
+            return_softmax=return_softmax,
             block_table=None,
         )
         if is_grad:
@@ -809,7 +803,7 @@ class FlashAttnFunc(torch.autograd.Function):
             window_size_right=window_size[1],
             softcap=softcap,
             alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
+            return_softmax=return_softmax,
         )
         if is_grad:
             ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
@@ -904,7 +898,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             window_size_right=window_size[1],
             softcap=softcap,
             alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
+            return_softmax=return_softmax,
             block_table=block_table,
         )
         if is_grad:
