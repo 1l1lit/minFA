@@ -10,7 +10,7 @@ def run_fwd():
     标准 Flash Attention 前向推理
     输入形状: (batch_size, seqlen, nheads, headdim)
     """
-    batch_size, seqlen, nheads, headdim = 1, 513, 1, 128
+    batch_size, seqlen, nheads, headdim = 1, 512, 1, 128
     
     # 随机初始化 Q, K, V
     q = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
@@ -39,7 +39,7 @@ def run_varlen_fwd():
     输入形状: (total_tokens, nheads, headdim)
     """
     max_seqlen = 128
-    nheads, headdim = 8, 64
+    nheads, headdim = 1, 64
     
     # 模拟变长序列长度，例如 [100, 128]
     seqlens = [100, 128]
@@ -63,7 +63,7 @@ def run_varlen_fwd():
         max_seqlen_k=max_seqlen,
         dropout_p=0.0,
         softmax_scale=None,
-        causal=True, # 变长通常用于解码，开启 causal
+        causal=False,
         window_size=(-1, -1),
         softcap=0.0,
         alibi_slopes=None,

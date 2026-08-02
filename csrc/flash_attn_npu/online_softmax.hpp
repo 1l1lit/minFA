@@ -410,22 +410,22 @@ public:
     }
 
     CATLASS_DEVICE void CopyPToGM(
-        const GlobalTensor<ElementOutput>& gP, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound, uint32_t sOffset,
+        const GlobalTensor<ElementOutput>& gP, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound, uint32_t qSOffset,
         uint32_t qSBlockSize, uint32_t maxKvSeqlen, uint64_t strideP)
     {
         uint32_t rowsDone = 0;
-        uint64_t nOffset = 0;
+        uint64_t qNOffset = 0;
         while (rowsDone < rowNum) {
-            uint32_t rowsCurHead = Min(rowNum - rowsDone, qSBlockSize - sOffset);
+            uint32_t rowsCurHead = Min(rowNum - rowsDone, qSBlockSize - qSOffset);
             for (uint32_t r = 0; r < rowsCurHead; r++) {
                 DataCopyPad(
-                    gP[nOffset + static_cast<uint64_t>((sOffset + r) * maxKvSeqlen)],
+                    gP[qNOffset + static_cast<uint64_t>((qSOffset + r) * maxKvSeqlen)],
                     lp[pingPongOffset][(rowsDone + r) * colNumRound],
                     DataCopyExtParams(1, colNum * sizeof(ElementOutput), 0, 0, 0));
             }
             rowsDone += rowsCurHead;
-            sOffset = 0;
-            nOffset += strideP;
+            qSOffset = 0;
+            qNOffset += strideP;
         }
     }
 
@@ -474,10 +474,10 @@ public:
             DataCopyParams(rowNumLoop, colNumRound / BLOCK_SIZE, 0, (colNumPad - colNumRound) / BLOCK_SIZE));
 
         if (gP.GetPhyAddr()) {
-            uint64_t nOffset = static_cast<uint64_t>(gRowOffset / qSBlockSize) * strideP;
-            uint32_t sOffset = gRowOffset % qSBlockSize;
+            uint64_t qNOffset = static_cast<uint64_t>(gRowOffset / qSBlockSize) * strideP;
+            uint32_t qSOffset = gRowOffset % qSBlockSize;
             CopyPToGM(
-                gP[gmOffsetP + nOffset], rowNumLoop, colNum, colNumRound, sOffset, qSBlockSize, maxKvSeqlen, strideP);
+                gP[gmOffsetP + qNOffset], rowNumLoop, colNum, colNumRound, qSOffset, qSBlockSize, maxKvSeqlen, strideP);
         }
 
         if constexpr (!doTriUMask) {

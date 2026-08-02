@@ -309,7 +309,6 @@ public:
             }
             uint32_t kvSLoopNumTotal = CeilDiv(noSkipKvS, MAX_KV_STACK_LEN); // task 的 KV 循环分块数目
             uint32_t stackSeqTile = MAX_KV_STACK_LEN;                        // 每次循环处理的 KV 序列长度
-            uint32_t stackSeqTilePad = MAX_KV_STACK_LEN;
 
             if ASCEND_IS_AIC {
                 layoutQTmp = LayoutQ(rowNum, embed);         // (S * N, D)
@@ -329,7 +328,7 @@ public:
                     uint64_t gmOffsetSTmp =
                         static_cast<uint64_t>((coreIdx * (PRE_LAUNCH + 1) + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB);
                     GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
-                    LayoutS layoutSTmp(rowNum, stackSeqTile, stackSeqTilePad);
+                    LayoutS layoutSTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
 
                     if ASCEND_IS_AIC {
                         if constexpr (PAGED_CACHE_FLAG_) {
@@ -343,7 +342,7 @@ public:
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
-                        LayoutP layoutPTmp(rowNum, stackSeqTile, stackSeqTilePad);
+                        LayoutP layoutPTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
                         LayoutMask layoutMask(COMP_TRIU_MASK_DIM_LEN, COMP_TRIU_MASK_DIM_LEN);
                         uint64_t gmOffsetPTmp = gmOffsetSTmp;
                         uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN;
@@ -392,7 +391,7 @@ public:
                     LayoutOTmp layoutOTmp(rowNum, embedV, embedRoundV);
 
                     if ASCEND_IS_AIC {
-                        LayoutP layoutPTmp(rowNum, stackSeqTile, stackSeqTilePad);
+                        LayoutP layoutPTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
                         uint64_t gmOffsetPTmp = gmOffsetOTmp;
                         if constexpr (PAGED_CACHE_FLAG_) {
                             blockMmadPV(

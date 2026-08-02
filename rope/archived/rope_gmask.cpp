@@ -187,8 +187,7 @@ int main()
 
     std::cout << "Input K: " << std::endl;
     for (int i = 0; i < 2 * N; i++) {
-        K1[i] = static_cast<T>(i);
-        K2[i] = static_cast<T>(i);
+        K1[i] = K2[i] = static_cast<T>(i);
         std::cout << K1[i] << " ";
     }
     std::cout << std::endl;

@@ -99,7 +99,6 @@ def ref_flash_attention(
     scale = scale.to(torch.float16) if inner_prec == 1 else scale.to(torch.float32)
     context_len = key.shape[2]
     context_size = 512
-    group_num = query.shape[0] // key.shape[0]
     gl = None
     go = None
     gp = None
@@ -162,29 +161,21 @@ def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     q_max_range = 5.0
     kv_min_range = -5.0
     kv_max_range = 5.0
-    num_blocks = 64
     query = (q_min_range + (q_max_range - q_min_range) * torch.rand(batch_size, q_seqlen, num_heads, head_size)).to(data_type).npu()
-    key_cache = None
-    value_cache = None
-
-    key_cache = (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(batch_size, kv_seqlen, kv_heads, head_size)).to(data_type).npu()
-    value_cache = (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(batch_size, kv_seqlen, kv_heads, head_size)).to(data_type).npu()
-
+    key = (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(batch_size, kv_seqlen, kv_heads, head_size)).to(data_type).npu()
+    value = (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(batch_size, kv_seqlen, kv_heads, head_size)).to(data_type).npu()
     scale = 1.0 / (head_size ** 0.5)
     window_size_left = -1
     window_size_right = -1
-    softcap = 0
-    num_splits = 0
-    alibi_slopes = None
  
     ret = flash_attn_func(
         query,
-        key_cache,
-        value_cache,
+        key,
+        value,
         0.0,
         causal=is_causal,
         window_size=[window_size_left,window_size_right],
-        alibi_slopes=alibi_slopes,
+        alibi_slopes=None,
         return_attn_probs=return_attn_probs)
     if not return_attn_probs:
         out = ret
@@ -198,17 +189,13 @@ def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     if is_causal:
         atten_mask = torch.triu(torch.ones(q_seqlen, kv_seqlen), diagonal=1).bool()
     for i in range(batch_size):
-        key_cache_per_batch = None
-        value_cache_per_batch = None
-
-        key_cache_per_batch = key_cache.detach().cpu()[i]
-        value_cache_per_batch = value_cache.detach().cpu()[i]
-
+        key_cpu = key.detach().cpu()[i]
+        value_cpu = value.detach().cpu()[i]
         query_cpu = query.detach().cpu()[i]
         if is_causal:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cache_per_batch, value_cache_per_batch, scale, atten_mask, data_type)
+            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, atten_mask, data_type)
         else:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cache_per_batch, value_cache_per_batch, scale, None, data_type)
+            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, None, data_type)
         golden_out[i:i+1] = output.reshape(q_seqlen, num_heads, head_size)
         golden_lseL[i:i+1] = golden_lse.reshape(num_heads, q_seqlen)
         golden_pL[i:i+1] = golden_p.reshape(num_heads, q_seqlen, kv_seqlen)
@@ -223,6 +210,7 @@ def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen,
 
 test_cases = [
     # (data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal)
+    (torch.bfloat16, 1, 1, 1, 16, 16, 8, False),
     (torch.bfloat16, 1, 1, 1, 512, 1024, 128, True),
     (torch.bfloat16, 2, 4, 4, 1024, 1024, 128, False),
     (torch.float16, 7, 5, 1, 512, 512, 128, True),
@@ -279,16 +267,16 @@ def test_fa_varlen_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_
     atten_mask = None
     if is_causal:
         atten_mask = (torch.triu(torch.ones(q_seqlen, kv_seqlen), diagonal=kv_seqlen - q_seqlen + 1)).to(torch.bool)
-    for i in range(1, batch_size + 1):
-        key_per_batch = key.detach().cpu()[(i - 1) * kv_seqlen : i * kv_seqlen]
-        value_per_batch = value.detach().cpu()[(i - 1) * kv_seqlen : i * kv_seqlen]
-        query_cpu = query.detach().cpu()[(i - 1) * q_seqlen : i * q_seqlen]
+    for i in range(batch_size):
+        key_cpu = key.detach().cpu()[i * kv_seqlen : (i+1) * kv_seqlen]
+        value_cpu = value.detach().cpu()[i * kv_seqlen : (i+1) * kv_seqlen]
+        query_cpu = query.detach().cpu()[i * q_seqlen : (i+1) * q_seqlen]
         if is_causal:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_per_batch, value_per_batch, scale, atten_mask, data_type)
+            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, atten_mask, data_type)
         else:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_per_batch, value_per_batch, scale, None, data_type)
-        golden_out[(i - 1) * q_seqlen : i * q_seqlen] = output.reshape(q_seqlen, num_heads, head_size)
-        golden_lseL[:, (i - 1) * q_seqlen : i * q_seqlen] = golden_lse.reshape(num_heads, q_seqlen)
+            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, None, data_type)
+        golden_out[i * q_seqlen : (i+1) * q_seqlen] = output.reshape(q_seqlen, num_heads, head_size)
+        golden_lseL[:, i * q_seqlen : (i+1) * q_seqlen] = golden_lse.reshape(num_heads, q_seqlen)
         golden_pL[i:i+1] = golden_p.reshape(num_heads, q_seqlen, kv_seqlen)
 
     rtol = 1e-2
