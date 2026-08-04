@@ -40,14 +40,13 @@ constexpr uint32_t FLT_PER_DATABLOCK = 8;
 constexpr uint32_t FLT_PER_REPEAT = 64;
 constexpr uint32_t REPEAT_SIZE = 256;
 
-enum class MaskType : uint32_t { NO_MASK = 0, MASK_CAUSAL = 1, MASK_SPEC = 2 };
+enum class MaskType : uint32_t { NO_MASK = 0, MASK_CAUSAL = 1 };
 
 enum class InputLayout : uint32_t { BSND = 0, TND = 1 };
 
 struct FAIKernelParams {
     GM_ADDR q;
     GM_ADDR k;
-    GM_ADDR p;
     GM_ADDR v;
     GM_ADDR mask;
     GM_ADDR blockTable;

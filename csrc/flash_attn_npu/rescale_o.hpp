@@ -20,8 +20,8 @@ using namespace AscendC;
 using namespace KernelCommon;
 
 namespace Catlass::Epilogue::Block {
-template <class OutputType_, class InputType_, class UpdateType_, class LseType_, LseModeT LSE_MODE_>
-class BlockEpilogue<EpilogueAtlasA2RescaleOT<LSE_MODE_>, OutputType_, InputType_, UpdateType_, LseType_> {
+template <class OutputType_, class InputType_, class UpdateType_, class LseType_>
+class BlockEpilogue<EpilogueAtlasA2RescaleOT, OutputType_, InputType_, UpdateType_, LseType_> {
 public:
     using ArchTag = Arch::AtlasA2;
 
@@ -201,36 +201,34 @@ public:
             CopyOToGm(
                 gOutput, proTokenIdx, proTokenNum, epiTokenNum, integralHeadNum, qSThisSubBlock, embed, oHiddenSize);
 
-            if constexpr (LSE_MODE_ == LseModeT::OUT_ONLY) {
-                if (isLastRowLoop) {
-                    Ln<float, false>(lse, gl, MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT), UnaryRepeatParams());
-                    PipeBarrier<PIPE_V>();
+            // move lse to GM
+            if (isLastRowLoop) {
+                Ln<float, false>(lse, gl, MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT), UnaryRepeatParams());
+                PipeBarrier<PIPE_V>();
 
-                    Add<float, false>(
-                        lse, lse, gm, MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT), BinaryRepeatParams());
-                    PipeBarrier<PIPE_V>();
+                Add<float, false>(lse, lse, gm, MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT), BinaryRepeatParams());
+                PipeBarrier<PIPE_V>();
 
-                    // lse_block = expand_to_block(lse)
-                    Brcb(tv, lse, CeilDiv(totalRowNum, DATABLOCK_PER_REPEAT), BrcbRepeatParams());
-                    PipeBarrier<PIPE_V>();
-                    SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
-                    WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
+                // lse_block = expand_to_block(lse)
+                Brcb(tv, lse, CeilDiv(totalRowNum, DATABLOCK_PER_REPEAT), BrcbRepeatParams());
+                PipeBarrier<PIPE_V>();
+                SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
+                WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
 
-                    if (qNThisSubBlock == 0) {
-                        // single head: its tokens are contiguous in BNS/NT -> plain lse32 burst.
-                        DataCopyPad(gLse, lse, DataCopyExtParams(1, totalRowNum * sizeof(float), 0, 0, 0));
-                    } else {
-                        // multi-head: per-token gather (srcStride) + scatter (dstStride).
-                        for (uint32_t qSIdx = 0; qSIdx < qSBlockSize; qSIdx++) {
-                            DataCopyPad(
-                                gLse[qSIdx], tv[qSIdx * DATABLOCK_PER_REPEAT],
-                                DataCopyExtParams(
-                                    qNThisSubBlock, sizeof(float), qSBlockSize - 1,
-                                    (layoutLse.stride(0) - 1) * sizeof(float), 0));
-                        }
+                if (qNThisSubBlock == 0) {
+                    // single head: its tokens are contiguous in BNS/NT -> plain lse32 burst.
+                    DataCopyPad(gLse, lse, DataCopyExtParams(1, totalRowNum * sizeof(float), 0, 0, 0));
+                } else {
+                    // multi-head: per-token gather (srcStride) + scatter (dstStride).
+                    for (uint32_t qSIdx = 0; qSIdx < qSBlockSize; qSIdx++) {
+                        DataCopyPad(
+                            gLse[qSIdx], tv[qSIdx * DATABLOCK_PER_REPEAT],
+                            DataCopyExtParams(
+                                qNThisSubBlock, sizeof(float), qSBlockSize - 1,
+                                (layoutLse.stride(0) - 1) * sizeof(float), 0));
                     }
-                    SetFlag<HardEvent::MTE3_V>(EVENT_ID4);
                 }
+                SetFlag<HardEvent::MTE3_V>(EVENT_ID4);
             }
         } else if (needRowLoop) {
             SetFlag<HardEvent::V_MTE3>(EVENT_ID5);

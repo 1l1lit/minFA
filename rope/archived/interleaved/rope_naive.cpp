@@ -7,7 +7,7 @@ using namespace AscendC;
 
 #define AsI32() template ReinterpretCast<int32_t>()
 
-constexpr int N = 48;
+constexpr int N = 56;
 constexpr int FLTB = 4;
 constexpr int SIZE = N * 4;
 
@@ -79,14 +79,13 @@ private:
         PipeBarrier<PIPE_V>();
 
         // *** Negate sin (interleave) ***
-        int repeatTimes = (2 * N) / 64;
-        int remainder = (2 * N) % 64;
-        uint64_t mask[2] = {0x5555555555555555, 0};
-        Muls(sinG, sinG, -1.0f, mask, repeatTimes, {1, 1, 8, 8});
-        if (remainder) {
-            int offset = repeatTimes * 64;
-            mask[0] = 0x55;
-            Muls(sinG[offset], sinG[offset], -1.0f, mask, remainder / 8, {1, 1, 1, 1});
+        int repeat = (2 * N) / 64;
+        int offset = repeat * 64;
+        uint64_t mask[1] = {0x5555555555555555};
+        Muls(sinG, sinG, -1.0f, mask, repeat, {1, 1, 8, 8});
+        if (offset < 2 * N) {
+            mask[0] >>= (2 * N - offset) / 8;
+            Muls(sinG[offset], sinG[offset], -1.0f, mask, 1, {1, 1, 0, 0});
         }
 
         // *** Interleave K ***
@@ -200,13 +199,10 @@ int main()
         cos[i] = static_cast<float>(i + 1);
         sin[i] = static_cast<float>(i + 1);
     }
-
-    std::cout << "Input K: " << std::endl;
     for (int i = 0; i < 2 * N; i++) {
-        K1[i] = K2[i] = static_cast<float>(i + 1);
-        std::cout << K1[i] << " ";
+        K1[i] = static_cast<float>(i + 1);
+        K2[i] = static_cast<float>(i + 1);
     }
-    std::cout << std::endl;
 
     rope_npu(K1, cos, sin);
     rope_cpu(K2, cos, sin);

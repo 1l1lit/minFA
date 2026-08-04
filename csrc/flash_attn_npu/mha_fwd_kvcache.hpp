@@ -33,7 +33,7 @@ using namespace KernelCommon;
 
 template <
     class BlockMmadQK, class BlockMmadPV, class EpilogueOnlineSoftmax, class EpilogueRescaleO, bool PAGED_CACHE_FLAG_,
-    MaskType MASK_TYPE_ = MaskType::NO_MASK, InputLayout INPUT_LAYOUT_ = InputLayout::BSND>
+    MaskType MASK_TYPE_, InputLayout INPUT_LAYOUT_>
 class FAInferKernel {
 public:
     using ArchTag = Arch::AtlasA2;
@@ -63,8 +63,6 @@ public:
     using ElementUpdate = typename EpilogueRescaleO::ElementUpdate;
     using LayoutUpdate = typename EpilogueRescaleO::LayoutUpdate;
 
-    static constexpr Epilogue::LseModeT LSE_MODE = EpilogueRescaleO::LSE_MODE;
-
     CATLASS_DEVICE FAInferKernel() = default;
 
     CATLASS_DEVICE void operator()(FAIKernelParams const& params)
@@ -90,7 +88,7 @@ public:
         AscendC::GlobalTensor<ElementK> gK;
         gK.SetGlobalBuffer((__gm__ ElementK*)params.k);
         AscendC::GlobalTensor<ElementP> gP;
-        gP.SetGlobalBuffer((__gm__ ElementP*)params.p);
+        gP.SetGlobalBuffer((__gm__ ElementP*)fATilingData->pDevice);
         AscendC::GlobalTensor<ElementV> gV;
         gV.SetGlobalBuffer((__gm__ ElementV*)params.v);
 
@@ -478,11 +476,10 @@ private:
 };
 
 template <
-    typename INPUT_DTYPE_ = half, bool PAGED_CACHE_FLAG_ = false, MaskType MASK_TYPE_ = MaskType::NO_MASK,
-    InputLayout INPUT_LAYOUT_ = InputLayout::BSND, Epilogue::LseModeT LSE_MODE_ = Epilogue::LseModeT::NONE>
+    typename INPUT_DTYPE_, bool PAGED_CACHE_FLAG_, MaskType MASK_TYPE_, InputLayout INPUT_LAYOUT_, bool RETURN_SOFTMAX_>
 CATLASS_GLOBAL void FAInfer(
-    uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR p, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o,
-    GM_ADDR lse, GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling)
+    uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
+    GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling)
 {
     AscendC::SetSyncBaseAddr(fftsAddr);
 
@@ -517,7 +514,7 @@ CATLASS_GLOBAL void FAInfer(
     using SType = Gemm::GemmType<ElementS, LayoutS>;
     using BlockMmadQK = Gemm::Block::BlockMmad<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, QType, KType, SType>;
 
-    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT<LSE_MODE_>;
+    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT<RETURN_SOFTMAX_>;
     using PType = Gemm::GemmType<ElementP, LayoutP>;
     using maskType = Gemm::GemmType<ElementMask, LayoutMask>;
     using EpilogueOnlineSoftmax = Epilogue::Block::BlockEpilogue<DispatchPolicyOnlineSoftmax, PType, SType, maskType>;
@@ -529,7 +526,7 @@ CATLASS_GLOBAL void FAInfer(
     using OTmpType = Gemm::GemmType<ElementOTmp, LayoutOTmp>;
     using BlockMmadPV = Gemm::Block::BlockMmad<DispatchPolicyPV, L1TileShapePV, L0TileShapePV, PType, VType, OTmpType>;
 
-    using DispatchPolicyRescaleO = Epilogue::EpilogueAtlasA2RescaleOT<LSE_MODE_>;
+    using DispatchPolicyRescaleO = Epilogue::EpilogueAtlasA2RescaleOT;
     using OType = Gemm::GemmType<ElementO, LayoutO>;
     using OUpdateType = Gemm::GemmType<ElementUpdate, LayoutUpdate>;
     using LseType = Gemm::GemmType<ElementLse, LayoutLse>;
@@ -539,7 +536,7 @@ CATLASS_GLOBAL void FAInfer(
     using FAInferKernel = FAInferKernel<
         BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO, PAGED_CACHE_FLAG_, MASK_TYPE_,
         INPUT_LAYOUT_>;
-    FAIKernelParams params{q, k, p, v, mask, blockTables, actualQseqlen, actualKvseqlen, o, lse, workspace, tiling};
+    FAIKernelParams params{q, k, v, mask, blockTables, actualQseqlen, actualKvseqlen, o, lse, workspace, tiling};
     FAInferKernel fAInfer;
     fAInfer(params);
 }

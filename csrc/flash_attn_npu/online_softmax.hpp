@@ -20,8 +20,8 @@ using namespace AscendC;
 using namespace KernelCommon;
 
 namespace Catlass::Epilogue::Block {
-template <class OutputType_, class InputType_, class MaskType_, LseModeT LSE_MODE_>
-class BlockEpilogue<EpilogueAtlasA2OnlineSoftmaxT<LSE_MODE_>, OutputType_, InputType_, MaskType_> {
+template <class OutputType_, class InputType_, class MaskType_, bool RETURN_SOFTMAX_>
+class BlockEpilogue<EpilogueAtlasA2OnlineSoftmaxT<RETURN_SOFTMAX_>, OutputType_, InputType_, MaskType_> {
 public:
     using ArchTag = Arch::AtlasA2;
 
@@ -410,8 +410,8 @@ public:
     }
 
     CATLASS_DEVICE void CopyPToGM(
-        const GlobalTensor<ElementOutput>& gP, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound, uint32_t qSOffset,
-        uint32_t qSBlockSize, uint32_t maxKvSeqlen, uint64_t strideP)
+        const GlobalTensor<ElementOutput>& gP, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound,
+        uint32_t qSOffset, uint32_t qSBlockSize, uint32_t maxKvSeqlen, uint64_t strideP)
     {
         uint32_t rowsDone = 0;
         uint64_t qNOffset = 0;
@@ -442,11 +442,9 @@ public:
         uint32_t colNumPad = layoutOutput.stride(0);
         uint32_t dmOffsetCurCycle = curStackTileMod * MAX_ROW_NUM_SUB_CORE + coreRowOffset;
 
-        if constexpr (LSE_MODE_ == LseModeT::OUT_ONLY) {
-            // In lse out-only mode, tv is used in the last stack tile to transport lse
-            if (isFirstStackTile && isFirstRowLoop) {
-                WaitFlag<HardEvent::MTE3_V>(EVENT_ID4);
-            }
+        // tv is used in the last stack tile to transport lse
+        if (isFirstStackTile && isFirstRowLoop) {
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID4);
         }
 
         CalcLocalRowMax(coreRowOffset, rowNumLoopRound, colNum, colNumRound);
@@ -473,7 +471,7 @@ public:
             gOutput, lp[pingPongOffset],
             DataCopyParams(rowNumLoop, colNumRound / BLOCK_SIZE, 0, (colNumPad - colNumRound) / BLOCK_SIZE));
 
-        if (gP.GetPhyAddr()) {
+        if constexpr (RETURN_SOFTMAX_) {
             uint64_t qNOffset = static_cast<uint64_t>(gRowOffset / qSBlockSize) * strideP;
             uint32_t qSOffset = gRowOffset % qSBlockSize;
             CopyPToGM(

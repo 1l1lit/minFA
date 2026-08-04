@@ -25,6 +25,7 @@ struct FAInferTilingData {
     uint64_t UpdateSize;
     uint64_t workspaceSize;
     float scaleValue;
+    GM_ADDR pDevice = nullptr;
 
     uint32_t get_numHeads() const { return numHeads; }
     uint32_t get_embeddingSize() const { return embeddingSize; }
@@ -43,6 +44,7 @@ struct FAInferTilingData {
     uint64_t get_UpdateSize() const { return UpdateSize; }
     uint64_t get_workspaceSize() const { return workspaceSize; }
     float get_scaleValue() const { return scaleValue; }
+    GM_ADDR get_pDevice() const { return pDevice; }
 
     void set_numHeads(uint32_t value) { numHeads = value; }
     void set_embeddingSize(uint32_t value) { embeddingSize = value; }
@@ -61,6 +63,7 @@ struct FAInferTilingData {
     void set_UpdateSize(uint64_t value) { UpdateSize = value; }
     void set_workspaceSize(uint64_t value) { workspaceSize = value; }
     void set_scaleValue(float value) { scaleValue = value; }
+    void set_pDevice(GM_ADDR value) { pDevice = value; }
 };
 
 #endif

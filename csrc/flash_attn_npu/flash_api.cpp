@@ -10,6 +10,18 @@
 #include "mha_fwd_kvcache.hpp"
 #include "tiling_data.hpp"
 
+#define FA_INFER(T, PAGED, MASK, LAYOUT, RETURN_SOFTMAX)                                                          \
+    FAInfer<T, PAGED, MASK, LAYOUT, RETURN_SOFTMAX><<<coreNum, nullptr, aclStream>>>(                             \
+        fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice, qSeqDevice, \
+        kvSeqDevice, workspaceDevice, tilingDevice)
+
+#define CASE_FA(T, PAGED, CAUSAL, VARLEN, RETURN_SOFTMAX)                        \
+    case ((PAGED << 3) | (CAUSAL << 2) | (VARLEN << 1) | (RETURN_SOFTMAX << 0)): \
+        FA_INFER(                                                                \
+            T, PAGED, (CAUSAL ? MaskType::MASK_CAUSAL : MaskType::NO_MASK),      \
+            (VARLEN ? InputLayout::TND : InputLayout::BSND), RETURN_SOFTMAX);    \
+        break
+
 std::vector<at::Tensor> mha_fwd(
     at::Tensor& q,                            // batch_size x seqlen_q x num_heads x head_size
     const at::Tensor& k,                      // batch_size x seqlen_k x num_heads_k x head_size
@@ -112,12 +124,12 @@ std::vector<at::Tensor> mha_fwd(
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
     tiling_cpu_ptr->set_workspaceSize(workspaceSize);
+    tiling_cpu_ptr->set_pDevice(return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr);
 
     // device ptrs
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
     auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
     auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
-    uint8_t* pDevice = return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr;
     at::Tensor seqlenq_npu_tensor = at::full({batch_size}, seqlen_q).to(at::Device(at::kPrivateUse1)).to(at::kInt);
     at::Tensor seqlenk_npu_tensor = at::full({batch_size}, seqlen_k).to(at::Device(at::kPrivateUse1)).to(at::kInt);
     at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
@@ -130,29 +142,20 @@ std::vector<at::Tensor> mha_fwd(
 
     // run kernel
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
+    int dispatch_code = (static_cast<int>(is_causal) << 2) | (static_cast<int>(return_softmax) << 0);
     if (is_bf16) {
-        if (is_causal) {
-            FAInfer<bfloat16_t, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-        } else {
-            FAInfer<bfloat16_t, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+        switch (dispatch_code) {
+            CASE_FA(bfloat16_t, 0, 0, 0, 0);
+            CASE_FA(bfloat16_t, 0, 0, 0, 1);
+            CASE_FA(bfloat16_t, 0, 1, 0, 0);
+            CASE_FA(bfloat16_t, 0, 1, 0, 1);
         }
     } else {
-        if (is_causal) {
-            FAInfer<half, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-        } else {
-            FAInfer<half, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                <<<coreNum, nullptr, aclStream>>>(
-                    fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                    softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
+        switch (dispatch_code) {
+            CASE_FA(half, 0, 0, 0, 0);
+            CASE_FA(half, 0, 0, 0, 1);
+            CASE_FA(half, 0, 1, 0, 0);
+            CASE_FA(half, 0, 1, 0, 1);
         }
     }
 
@@ -252,6 +255,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
     tiling_cpu_ptr->set_maxQSeqlen(max_seqlen_q);
     tiling_cpu_ptr->set_maxKvSeqlen(max_seqlen_k);
+    tiling_cpu_ptr->set_pDevice(return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr);
 
     uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
     uint64_t PRE_LAUNCH = KernelCommon::PRE_LAUNCH;
@@ -287,7 +291,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
     auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
     auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
-    uint8_t* pDevice = return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr;
 
     uint8_t* blockTableDevice = nullptr;
     uint8_t* maskDevice = nullptr;
@@ -305,59 +308,29 @@ std::vector<at::Tensor> mha_varlen_fwd(
     auto tilingDevice = static_cast<uint8_t*>(const_cast<void*>(tiling_npu_tensor.data_ptr()));
     auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmax_lse.data_ptr()));
 
+    int dispatch_code = (static_cast<int>(paged_KV) << 3) | (static_cast<int>(is_causal) << 2) | (1 << 1) |
+                        (static_cast<int>(return_softmax) << 0);
     if (is_bf16) {
-        if (paged_KV) {
-            if (is_causal) {
-                FAInfer<
-                    bfloat16_t, true, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<bfloat16_t, true, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
-        } else {
-            if (is_causal) {
-                FAInfer<
-                    bfloat16_t, false, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<bfloat16_t, false, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
+        switch (dispatch_code) {
+            CASE_FA(bfloat16_t, 0, 0, 1, 0);
+            CASE_FA(bfloat16_t, 0, 0, 1, 1);
+            CASE_FA(bfloat16_t, 0, 1, 1, 0);
+            CASE_FA(bfloat16_t, 0, 1, 1, 1);
+            CASE_FA(bfloat16_t, 1, 0, 1, 0);
+            CASE_FA(bfloat16_t, 1, 0, 1, 1);
+            CASE_FA(bfloat16_t, 1, 1, 1, 0);
+            CASE_FA(bfloat16_t, 1, 1, 1, 1);
         }
     } else {
-        if (paged_KV) {
-            if (is_causal) {
-                FAInfer<half, true, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<half, true, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
-        } else {
-            if (is_causal) {
-                FAInfer<half, false, MaskType::MASK_CAUSAL, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<half, false, MaskType::NO_MASK, InputLayout::TND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
+        switch (dispatch_code) {
+            CASE_FA(half, 0, 0, 1, 0);
+            CASE_FA(half, 0, 0, 1, 1);
+            CASE_FA(half, 0, 1, 1, 0);
+            CASE_FA(half, 0, 1, 1, 1);
+            CASE_FA(half, 1, 0, 1, 0);
+            CASE_FA(half, 1, 0, 1, 1);
+            CASE_FA(half, 1, 1, 1, 0);
+            CASE_FA(half, 1, 1, 1, 1);
         }
     }
 
@@ -509,7 +482,6 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     auto qDevice = static_cast<uint8_t*>(q.data_ptr());
     auto kDevice = static_cast<uint8_t*>(kcache.data_ptr());
     auto vDevice = static_cast<uint8_t*>(vcache.data_ptr());
-    uint8_t* pDevice = nullptr;
     uint8_t* blockTableDevice = nullptr;
     uint8_t* maskDevice = nullptr;
     if (paged_KV) {
@@ -525,61 +497,23 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     auto tilingDevice = static_cast<uint8_t*>(tiling_npu_tensor.data_ptr());
     auto softmaxLseDevice = static_cast<uint8_t*>(softmax_lse.data_ptr());
 
+    int dispatch_code = (static_cast<int>(paged_KV) << 3) | (static_cast<int>(is_causal) << 2);
     if (is_bf16) {
-        if (paged_KV) {
-            if (is_causal) {
-                FAInfer<
-                    bfloat16_t, true, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<bfloat16_t, true, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
-        } else {
-            if (is_causal) {
-                FAInfer<
-                    bfloat16_t, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<bfloat16_t, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
+        switch (dispatch_code) {
+            CASE_FA(bfloat16_t, 0, 0, 0, 0);
+            CASE_FA(bfloat16_t, 0, 1, 0, 0);
+            CASE_FA(bfloat16_t, 1, 0, 0, 0);
+            CASE_FA(bfloat16_t, 1, 1, 0, 0);
         }
     } else {
-        if (paged_KV) {
-            if (is_causal) {
-                FAInfer<half, true, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<half, true, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
-        } else {
-            if (is_causal) {
-                FAInfer<half, false, MaskType::MASK_CAUSAL, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            } else {
-                FAInfer<half, false, MaskType::NO_MASK, InputLayout::BSND, Catlass::Epilogue::LseModeT::OUT_ONLY>
-                    <<<coreNum, nullptr, aclStream>>>(
-                        fftsAddr, qDevice, kDevice, pDevice, vDevice, maskDevice, blockTableDevice, oDevice,
-                        softmaxLseDevice, qSeqDevice, kvSeqDevice, workspaceDevice, tilingDevice);
-            }
+        switch (dispatch_code) {
+            CASE_FA(half, 0, 0, 0, 0);
+            CASE_FA(half, 0, 1, 0, 0);
+            CASE_FA(half, 1, 0, 0, 0);
+            CASE_FA(half, 1, 1, 0, 0);
         }
     }
+
     return {out, softmax_lse};
 }
 
