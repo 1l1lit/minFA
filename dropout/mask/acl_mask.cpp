@@ -143,6 +143,8 @@ void launch_kernel(std::vector<T>& x, float p, int64_t seed, int64_t offset)
     if (workspaceSize > 0) {
         aclrtFree(workspaceAddr);
     }
+    aclDestroyTensor(t_mask);
+    aclDestroyIntArray(shape);
 
     kernel_func<RETURN_DROPOUT_><<<1, nullptr, stream>>>(d_x, d_m);
     aclrtSynchronizeStream(stream);

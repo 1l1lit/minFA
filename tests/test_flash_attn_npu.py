@@ -1,10 +1,8 @@
 # Copyright (c) 2026, Minghua Shen.
 
-import sys
-import os
 import torch
 import torch_npu
-# torch_npu.npu.set_device(5)
+torch_npu.npu.set_device(5)
 import pytest
 from flash_attn_npu import flash_attn_func, flash_attn_varlen_func, flash_attn_with_kvcache
 
@@ -89,6 +87,8 @@ def ref_flash_attention(
     scale,
     mask,
     data_type,
+    drop_mask=None,
+    drop_p=0.0
     ):
     inner_prec = 0
     interm_dtype = torch.float16 if inner_prec == 1 else torch.float32
@@ -121,7 +121,13 @@ def ref_flash_attention(
             gm = None
         p_result, row_sum, dm, gm = softmax1(qk_result, kv_start == 0, gm, interm_dtype)
         p_result = p_result.to(data_type)
-        gp = p_result if kv_start == 0 else torch.cat((gp, p_result), dim=-1)
+        if drop_mask is not None and drop_p > 0:
+            sub_drop_mask = drop_mask[:, :, kv_start: kv_start + sub_len]
+            p_return = p_result * (sub_drop_mask * 2 - 1)  # negate
+            gp = p_return if kv_start == 0 else torch.cat((gp, p_return), dim=-1)
+            p_result = p_result * sub_drop_mask / (1.0 - drop_p)
+        else:
+            gp = p_result if kv_start == 0 else torch.cat((gp, p_result), dim=-1)
         lo = pvMM2(p_result, sub_value).to(interm_dtype)
         if kv_start == 0:
             gl = row_sum
@@ -139,24 +145,24 @@ def ref_flash_attention(
 
 
 test_cases = [
-    # (data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, return_attn_probs, is_causal)
-    (torch.float16, 1, 1, 1, 1024, 1024, 128, True, False),
-    (torch.float16, 5, 4, 4, 1024, 1024, 128, True, True),
-    (torch.float16, 7, 1, 1, 512, 512, 128, True, False),
-    (torch.float16, 1, 1, 1, 1024, 1024, 128, False, False),
-    (torch.float16, 5, 4, 4, 1024, 1024, 128, False, True),
-    (torch.float16, 7, 1, 1, 512, 512, 128, False, False),
-    (torch.float16, 4, 2, 1, 513, 513, 128, False, False),
-    (torch.bfloat16, 1, 1, 1, 1024, 1024, 128, True, False),
-    (torch.bfloat16, 5, 4, 4, 1024, 1024, 128, True, True),
-    (torch.bfloat16, 7, 1, 1, 512, 512, 128, True, False),
-    (torch.bfloat16, 1, 1, 1, 1024, 1024, 128, False, False),
-    (torch.bfloat16, 5, 4, 4, 1024, 1024, 128, False, True),
-    (torch.bfloat16, 7, 1, 1, 512, 512, 128, False, False),
-    (torch.float16, 4, 2, 1, 513, 513, 128, False, False),
+    # (data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, return_attn_probs, is_causal, drop_p)
+    (torch.float16, 1, 1, 1, 1024, 1024, 128, True, False, 0.3),
+    (torch.float16, 5, 4, 4, 1024, 1024, 128, True, True, 0.3),
+    (torch.float16, 7, 1, 1, 512, 512, 128, True, False, 0.3),
+    (torch.float16, 1, 1, 1, 1024, 1024, 128, False, False, 0.0),
+    (torch.float16, 5, 4, 4, 1024, 1024, 128, False, True, 0.0),
+    (torch.float16, 7, 1, 1, 512, 512, 128, False, False, 0.0),
+    (torch.float16, 4, 2, 1, 513, 513, 128, False, False, 0.0),
+    (torch.bfloat16, 1, 1, 1, 1024, 1024, 128, True, False, 0.3),
+    (torch.bfloat16, 5, 4, 4, 1024, 1024, 128, True, True, 0.3),
+    (torch.bfloat16, 7, 1, 1, 512, 512, 128, True, False, 0.3),
+    (torch.bfloat16, 1, 1, 1, 1024, 1024, 128, False, False, 0.0),
+    (torch.bfloat16, 5, 4, 4, 1024, 1024, 128, False, True, 0.0),
+    (torch.bfloat16, 7, 1, 1, 512, 512, 128, False, False, 0.0),
+    (torch.bfloat16, 4, 2, 1, 513, 513, 128, False, False, 0.0),
 ]
-@pytest.mark.parametrize("data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, return_attn_probs, is_causal", test_cases)
-def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, return_attn_probs, is_causal):
+@pytest.mark.parametrize("data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, return_attn_probs, is_causal, drop_p", test_cases)
+def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, return_attn_probs, is_causal, drop_p):
     q_min_range = -5.0
     q_max_range = 5.0
     kv_min_range = -5.0
@@ -172,15 +178,17 @@ def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen,
         query,
         key,
         value,
-        0.0,
+        drop_p,
         causal=is_causal,
         window_size=[window_size_left,window_size_right],
         alibi_slopes=None,
         return_attn_probs=return_attn_probs)
     if not return_attn_probs:
         out = ret
+        drop_mask = None
     else:
         out, softmax_lse, p = ret
+        drop_mask = (p > 0).to(torch.float32).cpu() if drop_p > 0 else None
 
     golden_out = torch.empty((batch_size, q_seqlen, num_heads, head_size), dtype=data_type)
     golden_lseL = torch.empty((batch_size, num_heads, q_seqlen), dtype=torch.float32)
@@ -192,10 +200,15 @@ def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen,
         key_cpu = key.detach().cpu()[i]
         value_cpu = value.detach().cpu()[i]
         query_cpu = query.detach().cpu()[i]
-        if is_causal:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, atten_mask, data_type)
-        else:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, None, data_type)
+        output, golden_lse, golden_p = ref_flash_attention(
+            query_cpu,
+            key_cpu,
+            value_cpu,
+            scale,
+            atten_mask if is_causal else None,
+            data_type,
+            drop_mask[i] if drop_mask is not None else None,
+            drop_p)
         golden_out[i:i+1] = output.reshape(q_seqlen, num_heads, head_size)
         golden_lseL[i:i+1] = golden_lse.reshape(num_heads, q_seqlen)
         golden_pL[i:i+1] = golden_p.reshape(num_heads, q_seqlen, kv_seqlen)
@@ -209,19 +222,19 @@ def test_fa_fwd_custom_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen,
 
 
 test_cases = [
-    # (data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal)
-    (torch.bfloat16, 1, 1, 1, 16, 16, 8, False),
-    (torch.bfloat16, 1, 1, 1, 512, 1024, 128, True),
-    (torch.bfloat16, 2, 4, 4, 1024, 1024, 128, False),
-    (torch.float16, 7, 5, 1, 512, 512, 128, True),
-    (torch.float16, 7, 5, 1, 777, 888, 192, False),
-    (torch.float16, 7, 5, 1, 1777, 1888, 256, True),
-    (torch.bfloat16, 1, 1, 1, 7777, 8192, 64, True),
-    (torch.bfloat16, 7, 5, 1, 711, 8192, 111, True),
+    # (data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal, drop_p)
+    (torch.bfloat16, 1, 1, 1, 16, 16, 8, False, 0.3),
+    (torch.bfloat16, 1, 1, 1, 512, 1024, 128, True, 0.3),
+    (torch.bfloat16, 2, 4, 4, 1024, 1024, 128, False, 0.3),
+    (torch.float16, 7, 5, 1, 512, 512, 128, True, 0.3),
+    (torch.float16, 7, 5, 1, 777, 888, 192, False, 0.3),
+    (torch.float16, 7, 5, 1, 1777, 1888, 256, True, 0.3),
+    (torch.bfloat16, 1, 1, 1, 7777, 8192, 64, True, 0.3),
+    (torch.bfloat16, 7, 5, 1, 711, 8192, 111, True, 0.3),
 ]
 
-@pytest.mark.parametrize("data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal", test_cases)
-def test_fa_varlen_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal):
+@pytest.mark.parametrize("data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal, drop_p", test_cases)
+def test_fa_varlen_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal, drop_p):
     q_min_range = -5.0
     q_max_range = 5.0
     kv_min_range = -5.0
@@ -234,7 +247,6 @@ def test_fa_varlen_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_
 
     max_seqlen_q = q_seqlen
     max_seqlen_k = kv_seqlen
-    dropout_p = 0.0
     scale = 1.0 / (head_size ** 0.5)
     window_size_left = -1
     window_size_right = -1
@@ -251,7 +263,7 @@ def test_fa_varlen_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_
         actual_kv_len,
         max_seqlen_q,
         max_seqlen_k,
-        dropout_p=dropout_p,
+        dropout_p=drop_p,
         softmax_scale=scale,
         causal=is_causal,
         window_size=(window_size_left, window_size_right),  # -1 means infinite context window
@@ -261,6 +273,7 @@ def test_fa_varlen_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_
         return_attn_probs=return_attn_probs,
         block_table=block_table,
     )
+    drop_mask = (p > 0).to(torch.float32).cpu() if drop_p > 0 else None
     golden_out = torch.empty((batch_size * q_seqlen, num_heads, head_size), dtype=data_type)
     golden_lseL = torch.empty((num_heads, batch_size * q_seqlen), dtype=torch.float32)
     golden_pL = torch.empty((batch_size, num_heads, q_seqlen, kv_seqlen), dtype=data_type)
@@ -271,10 +284,15 @@ def test_fa_varlen_ops(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_
         key_cpu = key.detach().cpu()[i * kv_seqlen : (i+1) * kv_seqlen]
         value_cpu = value.detach().cpu()[i * kv_seqlen : (i+1) * kv_seqlen]
         query_cpu = query.detach().cpu()[i * q_seqlen : (i+1) * q_seqlen]
-        if is_causal:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, atten_mask, data_type)
-        else:
-            output, golden_lse, golden_p = ref_flash_attention(query_cpu, key_cpu, value_cpu, scale, None, data_type)
+        output, golden_lse, golden_p = ref_flash_attention(
+            query_cpu,
+            key_cpu,
+            value_cpu,
+            scale,
+            atten_mask if is_causal else None,
+            data_type,
+            drop_mask[i] if drop_mask is not None else None,
+            drop_p)
         golden_out[i * q_seqlen : (i+1) * q_seqlen] = output.reshape(q_seqlen, num_heads, head_size)
         golden_lseL[:, i * q_seqlen : (i+1) * q_seqlen] = golden_lse.reshape(num_heads, q_seqlen)
         golden_pL[i:i+1] = golden_p.reshape(num_heads, q_seqlen, kv_seqlen)

@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 
 #include "torch_npu/csrc/core/npu/NPUStream.h"
+#include "torch_npu/csrc/aten/NPUGeneratorImpl.h"
+#include "third_party/op-plugin/op_plugin/include/ops.h"
 #include "acl/acl.h"
 #include "runtime/rt_ffts.h"
 #include "kernel_operator.h"
@@ -10,16 +12,16 @@
 #include "mha_fwd_kvcache.hpp"
 #include "tiling_data.hpp"
 
-#define FA_INFER(T, PAGED, MASK, LAYOUT, RETURN_SOFTMAX)                                                          \
-    FAInfer<T, PAGED, MASK, LAYOUT, RETURN_SOFTMAX><<<coreNum, nullptr, aclStream>>>(                             \
+#define FA_INFER(T, PAGED, MASK, LAYOUT, RETURN_SOFTMAX, HAS_DROPOUT)                                             \
+    FAInfer<T, PAGED, MASK, LAYOUT, RETURN_SOFTMAX, HAS_DROPOUT><<<coreNum, nullptr, aclStream>>>(                \
         fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice, qSeqDevice, \
         kvSeqDevice, workspaceDevice, tilingDevice)
 
-#define CASE_FA(T, PAGED, CAUSAL, VARLEN, RETURN_SOFTMAX)                        \
-    case ((PAGED << 3) | (CAUSAL << 2) | (VARLEN << 1) | (RETURN_SOFTMAX << 0)): \
-        FA_INFER(                                                                \
-            T, PAGED, (CAUSAL ? MaskType::MASK_CAUSAL : MaskType::NO_MASK),      \
-            (VARLEN ? InputLayout::TND : InputLayout::BSND), RETURN_SOFTMAX);    \
+#define CASE_FA(T, PAGED, CAUSAL, VARLEN, RETURN_SOFTMAX, HAS_DROPOUT)                                \
+    case ((PAGED << 4) | (CAUSAL << 3) | (VARLEN << 2) | (RETURN_SOFTMAX << 1) | (HAS_DROPOUT << 0)): \
+        FA_INFER(                                                                                     \
+            T, PAGED, (CAUSAL ? MaskType::MASK_CAUSAL : MaskType::NO_MASK),                           \
+            (VARLEN ? InputLayout::TND : InputLayout::BSND), RETURN_SOFTMAX, HAS_DROPOUT);            \
         break
 
 std::vector<at::Tensor> mha_fwd(
@@ -32,6 +34,7 @@ std::vector<at::Tensor> mha_fwd(
     const float softcap, const bool return_softmax, std::optional<at::Generator> gen_)
 {
     const c10::OptionalDeviceGuard device_guard(device_of(q));
+    auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
     auto q_dtype = q.dtype();
     bool is_bf16 = q.dtype() == torch::kBFloat16;
     // parameters checking
@@ -40,10 +43,10 @@ std::vector<at::Tensor> mha_fwd(
         "FlashAttention only support fp16 and bf16 data type");
     TORCH_CHECK(k.dtype() == q_dtype, "query and key must have the same dtype");
     TORCH_CHECK(v.dtype() == q_dtype, "query and value must have the same dtype");
+    TORCH_CHECK(p_dropout >= 0.0f && p_dropout < 1.0f, "p_dropout must be in [0.0, 1.0)");
 
     // block unsupported params
     TORCH_CHECK(!alibi_slopes_.has_value(), "NPU FlashAttention does not support alibi_slopes.");
-    TORCH_CHECK(p_dropout == 0.0, "NPU FlashAttention does not support dropout.");
     TORCH_CHECK(softcap == 0.0, "NPU FlashAttention does not support softcap.");
     TORCH_CHECK(window_size_left == -1, "NPU FlashAttention does not support window_size_left.");
     TORCH_CHECK(window_size_right == -1, "NPU FlashAttention does not support window_size_right.");
@@ -70,16 +73,33 @@ std::vector<at::Tensor> mha_fwd(
     if (return_softmax) {
         p = torch::zeros({batch_size, num_heads, seqlen_q, seqlen_k}, opts);
     }
-    auto rng_state = torch::empty({2}, opts.dtype(torch::kInt64));
+    auto rng_state = torch::empty({2}, at::device(c10::kCPU).dtype(torch::kInt64));
 
     // init mask
-    at::Tensor mask_npu_tensor;
     uint8_t* maskDevice = nullptr;
+    at::Tensor mask_npu_tensor;
     if (is_causal) {
         at::Tensor mask_cpu_tensor = at::empty({2048, 2048}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
         maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
+    }
+
+    // init dropout
+    bool has_dropout = p_dropout > 0.0f;
+    at::Tensor drop_mask_npu_tensor;
+    if (has_dropout) {
+        uint64_t num_elems = static_cast<uint64_t>(batch_size) * num_heads * seqlen_q * seqlen_k;
+        at::Generator gen = gen_.has_value() ? gen_.value() : at_npu::detail::getDefaultNPUGenerator();
+        std::lock_guard<std::mutex> lock(gen.mutex());
+        auto [seed, offset] = gen.get<at_npu::NPUGeneratorImpl>()->philox_engine_inputs(num_elems);
+        int64_t drop_mask_bit_num = static_cast<int64_t>(batch_size) * num_heads * seqlen_q * ((seqlen_k + 7) / 8 * 8);
+        drop_mask_npu_tensor = at_npu::native::npu_dropout_gen_mask(
+            torch::empty({0}, at::device(at::kPrivateUse1).dtype(at::kFloat)), {drop_mask_bit_num}, p_dropout, seed,
+            offset, false, false);
+        uint64_t* rng_state_ptr = reinterpret_cast<uint64_t*>(const_cast<void*>(rng_state.data_ptr()));
+        rng_state_ptr[0] = seed;
+        rng_state_ptr[1] = offset;
     }
 
     // init softmax lse
@@ -115,8 +135,8 @@ std::vector<at::Tensor> mha_fwd(
     tiling_cpu_ptr->set_numBlocks(static_cast<uint32_t>(0));
     tiling_cpu_ptr->set_blockSize(static_cast<uint32_t>(128));
     tiling_cpu_ptr->set_maxNumBlocksPerBatch(static_cast<uint32_t>(0));
-    tiling_cpu_ptr->set_maskType(static_cast<uint32_t>(is_causal));
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
+    tiling_cpu_ptr->set_dropoutValue(1.0f / (1.0f - p_dropout));
     tiling_cpu_ptr->set_maxQSeqlen(seqlen_q);
     tiling_cpu_ptr->set_maxKvSeqlen(seqlen_k);
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
@@ -125,6 +145,8 @@ std::vector<at::Tensor> mha_fwd(
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
     tiling_cpu_ptr->set_workspaceSize(workspaceSize);
     tiling_cpu_ptr->set_pDevice(return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr);
+    tiling_cpu_ptr->set_dropMaskDevice(
+        has_dropout ? static_cast<uint8_t*>(const_cast<void*>(drop_mask_npu_tensor.data_ptr())) : nullptr);
 
     // device ptrs
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
@@ -141,21 +163,29 @@ std::vector<at::Tensor> mha_fwd(
     uint8_t* blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
 
     // run kernel
-    auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
-    int dispatch_code = (static_cast<int>(is_causal) << 2) | (static_cast<int>(return_softmax) << 0);
+    int dispatch_code = (static_cast<int>(is_causal) << 3) | (static_cast<int>(return_softmax) << 1) |
+                        (static_cast<int>(has_dropout) << 0);
     if (is_bf16) {
         switch (dispatch_code) {
-            CASE_FA(bfloat16_t, 0, 0, 0, 0);
-            CASE_FA(bfloat16_t, 0, 0, 0, 1);
-            CASE_FA(bfloat16_t, 0, 1, 0, 0);
-            CASE_FA(bfloat16_t, 0, 1, 0, 1);
+            CASE_FA(bfloat16_t, 0, 0, 0, 0, 0);
+            CASE_FA(bfloat16_t, 0, 0, 0, 0, 1);
+            CASE_FA(bfloat16_t, 0, 0, 0, 1, 0);
+            CASE_FA(bfloat16_t, 0, 0, 0, 1, 1);
+            CASE_FA(bfloat16_t, 0, 1, 0, 0, 0);
+            CASE_FA(bfloat16_t, 0, 1, 0, 0, 1);
+            CASE_FA(bfloat16_t, 0, 1, 0, 1, 0);
+            CASE_FA(bfloat16_t, 0, 1, 0, 1, 1);
         }
     } else {
         switch (dispatch_code) {
-            CASE_FA(half, 0, 0, 0, 0);
-            CASE_FA(half, 0, 0, 0, 1);
-            CASE_FA(half, 0, 1, 0, 0);
-            CASE_FA(half, 0, 1, 0, 1);
+            CASE_FA(half, 0, 0, 0, 0, 0);
+            CASE_FA(half, 0, 0, 0, 0, 1);
+            CASE_FA(half, 0, 0, 0, 1, 0);
+            CASE_FA(half, 0, 0, 0, 1, 1);
+            CASE_FA(half, 0, 1, 0, 0, 0);
+            CASE_FA(half, 0, 1, 0, 0, 1);
+            CASE_FA(half, 0, 1, 0, 1, 0);
+            CASE_FA(half, 0, 1, 0, 1, 1);
         }
     }
 
@@ -195,11 +225,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(!seqused_k_.has_value(), "NPU FlashAttention does not support seqused_k.");
     TORCH_CHECK(!leftpad_k_.has_value(), "NPU FlashAttention does not support leftpad_k.");
     TORCH_CHECK(!alibi_slopes_.has_value(), "NPU FlashAttention does not support alibi_slopes.");
-    TORCH_CHECK(p_dropout == 0.0, "NPU FlashAttention does not support dropout.");
     TORCH_CHECK(!zero_tensors, "NPU FlashAttention does not support zero_tensors.");
     TORCH_CHECK(softcap == 0.0, "NPU FlashAttention does not support softcap.");
     TORCH_CHECK(window_size_left == -1, "NPU FlashAttention does not support window_size_left.");
     TORCH_CHECK(window_size_right == -1, "NPU FlashAttention does not support window_size_right.");
+    TORCH_CHECK(p_dropout >= 0.0f && p_dropout < 1.0f, "p_dropout must be in [0.0, 1.0)");
     TORCH_CHECK(k.dtype() == q.dtype(), "query and key must have the same dtype");
     TORCH_CHECK(v.dtype() == q.dtype(), "query and value must have the same dtype");
     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
@@ -241,7 +271,24 @@ std::vector<at::Tensor> mha_varlen_fwd(
     if (return_softmax) {
         p = torch::zeros({batch_size, num_heads, max_seqlen_q, max_seqlen_k}, opts);
     }
-    auto rng_state = torch::empty({2}, opts.dtype(torch::kInt64));
+    auto rng_state = torch::empty({2}, at::device(c10::kCPU).dtype(torch::kInt64));
+
+    bool has_dropout = p_dropout > 0.0f;
+    at::Tensor drop_mask_npu_tensor;
+    if (has_dropout) {
+        uint64_t num_elems = static_cast<uint64_t>(batch_size) * num_heads * max_seqlen_q * max_seqlen_k;
+        at::Generator gen = gen_.has_value() ? gen_.value() : at_npu::detail::getDefaultNPUGenerator();
+        std::lock_guard<std::mutex> lock(gen.mutex());
+        auto [seed, offset] = gen.get<at_npu::NPUGeneratorImpl>()->philox_engine_inputs(num_elems);
+        int64_t drop_mask_bit_num =
+            static_cast<int64_t>(batch_size) * num_heads * max_seqlen_q * ((max_seqlen_k + 7) / 8 * 8);
+        drop_mask_npu_tensor = at_npu::native::npu_dropout_gen_mask(
+            torch::empty({0}, at::device(at::kPrivateUse1).dtype(at::kFloat)), {drop_mask_bit_num}, p_dropout, seed,
+            offset, false, false);
+        uint64_t* rng_state_ptr = reinterpret_cast<uint64_t*>(const_cast<void*>(rng_state.data_ptr()));
+        rng_state_ptr[0] = seed;
+        rng_state_ptr[1] = offset;
+    }
 
     tiling_cpu_ptr->set_batch(static_cast<uint32_t>(batch_size));
     tiling_cpu_ptr->set_numHeads(static_cast<uint32_t>(num_heads));
@@ -251,11 +298,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
     tiling_cpu_ptr->set_numBlocks(static_cast<uint32_t>(num_blocks));
     tiling_cpu_ptr->set_blockSize(static_cast<uint32_t>(page_block_size));
     tiling_cpu_ptr->set_maxNumBlocksPerBatch(static_cast<uint32_t>(max_num_blocks_per_seq));
-    tiling_cpu_ptr->set_maskType(static_cast<uint32_t>(is_causal));
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
+    tiling_cpu_ptr->set_dropoutValue(1.0f / (1.0f - p_dropout));
     tiling_cpu_ptr->set_maxQSeqlen(max_seqlen_q);
     tiling_cpu_ptr->set_maxKvSeqlen(max_seqlen_k);
     tiling_cpu_ptr->set_pDevice(return_softmax ? static_cast<uint8_t*>(const_cast<void*>(p.data_ptr())) : nullptr);
+    tiling_cpu_ptr->set_dropMaskDevice(
+        has_dropout ? static_cast<uint8_t*>(const_cast<void*>(drop_mask_npu_tensor.data_ptr())) : nullptr);
 
     uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
     uint64_t PRE_LAUNCH = KernelCommon::PRE_LAUNCH;
@@ -308,29 +357,45 @@ std::vector<at::Tensor> mha_varlen_fwd(
     auto tilingDevice = static_cast<uint8_t*>(const_cast<void*>(tiling_npu_tensor.data_ptr()));
     auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmax_lse.data_ptr()));
 
-    int dispatch_code = (static_cast<int>(paged_KV) << 3) | (static_cast<int>(is_causal) << 2) | (1 << 1) |
-                        (static_cast<int>(return_softmax) << 0);
+    int dispatch_code = (static_cast<int>(paged_KV) << 4) | (static_cast<int>(is_causal) << 3) | (1 << 2) |
+                        (static_cast<int>(return_softmax) << 1) | (static_cast<int>(has_dropout) << 0);
     if (is_bf16) {
         switch (dispatch_code) {
-            CASE_FA(bfloat16_t, 0, 0, 1, 0);
-            CASE_FA(bfloat16_t, 0, 0, 1, 1);
-            CASE_FA(bfloat16_t, 0, 1, 1, 0);
-            CASE_FA(bfloat16_t, 0, 1, 1, 1);
-            CASE_FA(bfloat16_t, 1, 0, 1, 0);
-            CASE_FA(bfloat16_t, 1, 0, 1, 1);
-            CASE_FA(bfloat16_t, 1, 1, 1, 0);
-            CASE_FA(bfloat16_t, 1, 1, 1, 1);
+            CASE_FA(bfloat16_t, 0, 0, 1, 0, 0);
+            CASE_FA(bfloat16_t, 0, 0, 1, 0, 1);
+            CASE_FA(bfloat16_t, 0, 0, 1, 1, 0);
+            CASE_FA(bfloat16_t, 0, 0, 1, 1, 1);
+            CASE_FA(bfloat16_t, 0, 1, 1, 0, 0);
+            CASE_FA(bfloat16_t, 0, 1, 1, 0, 1);
+            CASE_FA(bfloat16_t, 0, 1, 1, 1, 0);
+            CASE_FA(bfloat16_t, 0, 1, 1, 1, 1);
+            CASE_FA(bfloat16_t, 1, 0, 1, 0, 0);
+            CASE_FA(bfloat16_t, 1, 0, 1, 0, 1);
+            CASE_FA(bfloat16_t, 1, 0, 1, 1, 0);
+            CASE_FA(bfloat16_t, 1, 0, 1, 1, 1);
+            CASE_FA(bfloat16_t, 1, 1, 1, 0, 0);
+            CASE_FA(bfloat16_t, 1, 1, 1, 0, 1);
+            CASE_FA(bfloat16_t, 1, 1, 1, 1, 0);
+            CASE_FA(bfloat16_t, 1, 1, 1, 1, 1);
         }
     } else {
         switch (dispatch_code) {
-            CASE_FA(half, 0, 0, 1, 0);
-            CASE_FA(half, 0, 0, 1, 1);
-            CASE_FA(half, 0, 1, 1, 0);
-            CASE_FA(half, 0, 1, 1, 1);
-            CASE_FA(half, 1, 0, 1, 0);
-            CASE_FA(half, 1, 0, 1, 1);
-            CASE_FA(half, 1, 1, 1, 0);
-            CASE_FA(half, 1, 1, 1, 1);
+            CASE_FA(half, 0, 0, 1, 0, 0);
+            CASE_FA(half, 0, 0, 1, 0, 1);
+            CASE_FA(half, 0, 0, 1, 1, 0);
+            CASE_FA(half, 0, 0, 1, 1, 1);
+            CASE_FA(half, 0, 1, 1, 0, 0);
+            CASE_FA(half, 0, 1, 1, 0, 1);
+            CASE_FA(half, 0, 1, 1, 1, 0);
+            CASE_FA(half, 0, 1, 1, 1, 1);
+            CASE_FA(half, 1, 0, 1, 0, 0);
+            CASE_FA(half, 1, 0, 1, 0, 1);
+            CASE_FA(half, 1, 0, 1, 1, 0);
+            CASE_FA(half, 1, 0, 1, 1, 1);
+            CASE_FA(half, 1, 1, 1, 0, 0);
+            CASE_FA(half, 1, 1, 1, 0, 1);
+            CASE_FA(half, 1, 1, 1, 1, 0);
+            CASE_FA(half, 1, 1, 1, 1, 1);
         }
     }
 
@@ -446,7 +511,6 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     tiling_cpu_ptr->set_numBlocks(static_cast<uint32_t>(num_blocks));
     tiling_cpu_ptr->set_blockSize(static_cast<uint32_t>(page_block_size));
     tiling_cpu_ptr->set_maxNumBlocksPerBatch(static_cast<uint32_t>(max_num_blocks_per_seq));
-    tiling_cpu_ptr->set_maskType(static_cast<uint32_t>(is_causal));
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
     tiling_cpu_ptr->set_maxQSeqlen(seqlen_q);
 
@@ -497,20 +561,20 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     auto tilingDevice = static_cast<uint8_t*>(tiling_npu_tensor.data_ptr());
     auto softmaxLseDevice = static_cast<uint8_t*>(softmax_lse.data_ptr());
 
-    int dispatch_code = (static_cast<int>(paged_KV) << 3) | (static_cast<int>(is_causal) << 2);
+    int dispatch_code = (static_cast<int>(paged_KV) << 4) | (static_cast<int>(is_causal) << 3);
     if (is_bf16) {
         switch (dispatch_code) {
-            CASE_FA(bfloat16_t, 0, 0, 0, 0);
-            CASE_FA(bfloat16_t, 0, 1, 0, 0);
-            CASE_FA(bfloat16_t, 1, 0, 0, 0);
-            CASE_FA(bfloat16_t, 1, 1, 0, 0);
+            CASE_FA(bfloat16_t, 0, 0, 0, 0, 0);
+            CASE_FA(bfloat16_t, 0, 1, 0, 0, 0);
+            CASE_FA(bfloat16_t, 1, 0, 0, 0, 0);
+            CASE_FA(bfloat16_t, 1, 1, 0, 0, 0);
         }
     } else {
         switch (dispatch_code) {
-            CASE_FA(half, 0, 0, 0, 0);
-            CASE_FA(half, 0, 1, 0, 0);
-            CASE_FA(half, 1, 0, 0, 0);
-            CASE_FA(half, 1, 1, 0, 0);
+            CASE_FA(half, 0, 0, 0, 0, 0);
+            CASE_FA(half, 0, 1, 0, 0, 0);
+            CASE_FA(half, 1, 0, 0, 0, 0);
+            CASE_FA(half, 1, 1, 0, 0, 0);
         }
     }
 

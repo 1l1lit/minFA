@@ -20,8 +20,8 @@ using namespace AscendC;
 using namespace KernelCommon;
 
 namespace Catlass::Epilogue::Block {
-template <class OutputType_, class InputType_, class UpdateType_, class LseType_>
-class BlockEpilogue<EpilogueAtlasA2RescaleOT, OutputType_, InputType_, UpdateType_, LseType_> {
+template <class OutputType_, class InputType_, class UpdateType_, class LseType_, bool HAS_DROPOUT_>
+class BlockEpilogue<EpilogueAtlasA2RescaleOT<HAS_DROPOUT_>, OutputType_, InputType_, UpdateType_, LseType_> {
 public:
     using ArchTag = Arch::AtlasA2;
 
@@ -42,8 +42,10 @@ public:
 
     CATLASS_DEVICE ~BlockEpilogue() = default;
 
-    CATLASS_DEVICE void init(Arch::Resource<ArchTag>& resource)
+    CATLASS_DEVICE void init(Arch::Resource<ArchTag>& resource, float dropoutVal_)
     {
+        dropoutVal = dropoutVal_;
+
         constexpr uint32_t LO_OFFSET = 6 * UB_BLK_SIZE;
         constexpr uint32_t GO_OFFSET = 8 * UB_BLK_SIZE;
 
@@ -116,7 +118,7 @@ public:
 
         if (!isFirstStackTile) {
             WaitFlag<HardEvent::V_MTE2>(EVENT_ID3);
-            DataCopy(lo, gInput, DataCopyParams(1, curRowNum * embedRound / DATABLOCK_PER_REPEAT, 0, 0));
+            DataCopy(lo, gInput, DataCopyParams(1, curRowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
             SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
         }
 
@@ -126,7 +128,7 @@ public:
             PipeBarrier<PIPE_V>();
 
             if (needRowLoop) {
-                DataCopy(go32, gUpdate, DataCopyParams(1, curRowNum * embedRound / DATABLOCK_PER_REPEAT, 0, 0));
+                DataCopy(go32, gUpdate, DataCopyParams(1, curRowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
                 SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
                 WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
             }
@@ -188,11 +190,19 @@ public:
             }
             PipeBarrier<PIPE_V>();
 
+            if constexpr (HAS_DROPOUT_) {
+                // go = go * (1 / (1 - p))
+                Muls<float, false>(
+                    go32, go32, dropoutVal, MASK_NUL, CeilDiv(curRowNum * embedRound, FLT_PER_REPEAT),
+                    UnaryRepeatParams());
+                PipeBarrier<PIPE_V>();
+            }
+
             // go = castfp32to16(go)
             RoundMode roundMode =
                 std::is_same_v<ElementOutput, bfloat16_t> ? RoundMode::CAST_RINT : RoundMode::CAST_NONE;
             Cast<ElementOutput, float, false>(
-                go16, go32, roundMode, MASK_NUL, (curRowNum * embedRound + FLT_PER_REPEAT - 1) / FLT_PER_REPEAT,
+                go16, go32, roundMode, MASK_NUL, CeilDiv(curRowNum * embedRound, FLT_PER_REPEAT),
                 UnaryRepeatParams(1, 1, 4, 8));
             SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
             WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
@@ -317,6 +327,8 @@ public:
     }
 
 private:
+    float dropoutVal;
+
     LocalTensor<float> lo;
     LocalTensor<float> dm;
     LocalTensor<float> gl;

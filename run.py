@@ -1,7 +1,7 @@
 import sys
 import torch
 import torch_npu
-# torch_npu.npu.set_device(5)
+torch_npu.npu.set_device(5)
 from flash_attn_npu import flash_attn_func, flash_attn_varlen_func, flash_attn_with_kvcache
 
 
@@ -10,7 +10,7 @@ def run_fwd():
     标准 Flash Attention 前向推理
     输入形状: (batch_size, seqlen, nheads, headdim)
     """
-    batch_size, seqlen, nheads, headdim = 1, 512, 1, 128
+    batch_size, seqlen, nheads, headdim = 1, 16, 1, 16
     
     # 随机初始化 Q, K, V
     q = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
@@ -18,19 +18,22 @@ def run_fwd():
     v = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
     
     # 调用接口
-    output = flash_attn_func(
+    output, _, p = flash_attn_func(
         q=q,
         k=k,
         v=v,
-        dropout_p=0.0,
+        dropout_p=0.5,
         softmax_scale=None,
         causal=False,
         window_size=(-1, -1),
         softcap=0.0,
         alibi_slopes=None,
         deterministic=False,
-        return_attn_probs=False
+        return_attn_probs=True
     )
+
+    print(p)
+
     return output
 
 def run_varlen_fwd():

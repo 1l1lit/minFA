@@ -37,7 +37,9 @@ constexpr uint32_t UB_BLK_SIZE = 16384; // 16 KB
 
 constexpr uint32_t DATABLOCK_PER_REPEAT = 8;
 constexpr uint32_t FLT_PER_DATABLOCK = 8;
+constexpr uint32_t HALF_PER_DATABLOCK = 16;
 constexpr uint32_t FLT_PER_REPEAT = 64;
+constexpr uint32_t HALF_PER_REPEAT = 128;
 constexpr uint32_t REPEAT_SIZE = 256;
 
 enum class MaskType : uint32_t { NO_MASK = 0, MASK_CAUSAL = 1 };

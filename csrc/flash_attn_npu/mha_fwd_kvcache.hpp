@@ -7,6 +7,7 @@
 #ifndef MHA_FWD_KVCACHE_HPP
 #define MHA_FWD_KVCACHE_HPP
 
+#include "kernel_operator.h"
 #include "catlass/arch/arch.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
@@ -17,8 +18,6 @@
 #include "catlass/gemm/dispatch_policy.hpp"
 #include "catlass/gemm/gemm_type.hpp"
 #include "catlass/layout/layout.hpp"
-
-#include "kernel_operator.h"
 
 #include "kernel_common.hpp"
 #include "tiling_data.hpp"
@@ -80,8 +79,8 @@ public:
         uint32_t maxNumBlocksPerBatch = fATilingData->maxNumBlocksPerBatch;
         uint32_t maxQSeqlen = fATilingData->maxQSeqlen;
         uint32_t maxKvSeqlen = fATilingData->maxKvSeqlen;
-        uint32_t maskType = fATilingData->maskType;
         float scaleValue = fATilingData->scaleValue;
+        float dropoutValue = fATilingData->dropoutValue;
 
         AscendC::GlobalTensor<ElementQ> gQ;
         gQ.SetGlobalBuffer((__gm__ ElementQ*)params.q);
@@ -94,6 +93,8 @@ public:
 
         AscendC::GlobalTensor<ElementMask> gMask;
         gMask.SetGlobalBuffer((__gm__ ElementMask*)params.mask);
+        AscendC::GlobalTensor<ElementMask> gDrop;
+        gDrop.SetGlobalBuffer((__gm__ ElementMask*)fATilingData->dropMaskDevice);
         AscendC::GlobalTensor<int32_t> gBlockTable;
         gBlockTable.SetGlobalBuffer((__gm__ int32_t*)(params.blockTable));
         AscendC::GlobalTensor<int32_t> gActualQseqlen;
@@ -151,6 +152,13 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
         }
 
+        uint32_t strideQ = qHeads * embed;
+        uint32_t strideK = kvHeads * embed;
+        uint32_t strideP = maxQSeqlen * maxKvSeqlen;
+        uint32_t strideV = kvHeads * embedV;
+        uint32_t strideO = qHeads * embedV;
+        uint32_t strideDrop = maxQSeqlen * CeilDiv(maxKvSeqlen, 8);
+
         if ASCEND_IS_AIC {
             uint32_t kDynNum = RoundUp(embed, NUM_128); // K 对应 embed 维度，不能太小
             kDynNum = Max(kDynNum, NUM_256);            // 至少为 256
@@ -169,17 +177,12 @@ public:
             blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN);
             blockMmadPV.init(resource, kPVDynNum, MAX_KV_STACK_LEN, qkL1Size);
         } else { // ASCEND_IS_AIV
-            epilogueOnlineSoftmax.init(resource, scaleValue);
-            epilogueRescaleO.init(resource);
+            epilogueOnlineSoftmax.init(resource, scaleValue, gDrop, strideDrop, gP, strideP, maxKvSeqlen);
+            epilogueRescaleO.init(resource, dropoutValue);
         }
 
-        uint64_t strideQ = static_cast<uint64_t>(qHeads * embed);
-        uint64_t strideK = static_cast<uint64_t>(kvHeads * embed);
-        uint64_t strideP = static_cast<uint64_t>(maxQSeqlen * maxKvSeqlen);
-        uint64_t strideV = static_cast<uint64_t>(kvHeads * embedV);
-        uint64_t strideO = static_cast<uint64_t>(qHeads * embedV);
         uint32_t embedRound = RoundUp(embed, BLOCK_SIZE);
-        uint32_t embedRoundV = RoundUp(embedV, BLOCK_SIZE);
+        uint32_t embedVRound = RoundUp(embedV, BLOCK_SIZE);
         uint32_t groupSize = qHeads / kvHeads;
 
         uint64_t qBOffset = 0;
@@ -188,6 +191,7 @@ public:
         uint64_t vBOffset = 0;
         uint64_t oBOffset = 0;
         uint64_t lseBOffset = 0;
+        uint64_t dropBOffset = 0;
         uint64_t blockBOffset = 0;
 
         uint32_t preTotalTaskNum = 0;
@@ -221,19 +225,20 @@ public:
                     preTotalTaskNum = curTotalTaskNum;
                     qBOffset += qSeqlen * strideQ;
                     if constexpr (!PAGED_CACHE_FLAG_) {
-                        kBOffset += static_cast<uint64_t>(kvSeqlen * strideK);
-                        vBOffset += static_cast<uint64_t>(kvSeqlen * strideV);
+                        kBOffset += kvSeqlen * strideK;
+                        vBOffset += kvSeqlen * strideV;
                     } else {
-                        blockBOffset += static_cast<uint64_t>(maxNumBlocksPerBatch);
+                        blockBOffset += maxNumBlocksPerBatch;
                     }
-                    pBOffset += static_cast<uint64_t>(qHeads * strideP);
-                    oBOffset += static_cast<uint64_t>(qSeqlen * strideO);
+                    pBOffset += qHeads * strideP;
+                    oBOffset += qSeqlen * strideO;
                     // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
                     if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
-                        lseBOffset += static_cast<uint64_t>(qSeqlen);
+                        lseBOffset += qSeqlen;
                     } else {
-                        lseBOffset += static_cast<uint64_t>(qSeqlen * qHeads);
+                        lseBOffset += qSeqlen * qHeads;
                     }
+                    dropBOffset += qHeads * strideDrop;
                 }
 
                 qSeqlen = maxQSeqlen;
@@ -263,43 +268,47 @@ public:
             uint32_t taskIdxCurBatch = taskIdx - preTotalTaskNum;
             uint32_t qSBlockIdx = taskIdxCurBatch / curQNBlockNum;         // task 的 S 维分块索引
             uint32_t qNBlockIdx = taskIdxCurBatch % curQNBlockNum;         // task 的 N 维分块索引
+            uint32_t qSStartIdx = qSBlockIdx * curQSBlockTile;             // Q 的 S 维元素起始索引
             uint32_t qNBlockIdxCurGroup = qNBlockIdx % qNBlockNumPerGroup; // Q 的 group 内 N 维分块索引
             uint32_t kvNIdx = qNBlockIdx / qNBlockNumPerGroup;             // Q 对应 KV 的 N 维分块索引
             uint32_t qNStartIdx = kvNIdx * groupSize + qNBlockIdxCurGroup * curQNBlockTile; // Q 的 N 维元素起始索引
 
-            uint64_t gmOffsetQ = qBOffset +                                                     // B 偏移
-                                 static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideQ + // S 偏移
-                                 static_cast<uint64_t>(qNStartIdx * embed);                     // N 偏移
+            uint64_t gmOffsetQ = qBOffset +             // B 偏移
+                                 qSStartIdx * strideQ + // S 偏移
+                                 qNStartIdx * embed;    // N 偏移
 
-            uint64_t gmOffsetK = kBOffset +                             // B 偏移
-                                 static_cast<uint64_t>(kvNIdx * embed); // N 偏移，在后面遍历 S 维
+            uint64_t gmOffsetK = kBOffset +      // B 偏移
+                                 kvNIdx * embed; // N 偏移，在后面遍历 S 维
 
-            uint64_t gmOffsetP =
-                pBOffset +                                                        // B 偏移
-                static_cast<uint64_t>(qNStartIdx) * strideP +                     // N 偏移
-                static_cast<uint64_t>(qSBlockIdx * curQSBlockTile * maxKvSeqlen); // S(Q) 偏移，在后面遍历 S(K) 维
+            uint64_t gmOffsetP = pBOffset +                // B 偏移
+                                 qNStartIdx * strideP +    // N 偏移
+                                 qSStartIdx * maxKvSeqlen; // S(Q) 偏移，在后面遍历 S(K) 维
 
-            uint64_t gmOffsetV = vBOffset +                              // B 偏移
-                                 static_cast<uint64_t>(kvNIdx * embedV); // N 偏移，在后面遍历 S 维
+            uint64_t gmOffsetV = vBOffset +       // B 偏移
+                                 kvNIdx * embedV; // N 偏移，在后面遍历 S 维
 
-            uint64_t gmOffsetO = oBOffset +                                                     // B 偏移
-                                 static_cast<uint64_t>(qSBlockIdx * curQSBlockTile) * strideO + // S 偏移
-                                 static_cast<uint64_t>(qNStartIdx * embedV);                    // N 偏移
+            uint64_t gmOffsetO = oBOffset +             // B 偏移
+                                 qSStartIdx * strideO + // S 偏移
+                                 qNStartIdx * embedV;   // N 偏移
 
-            uint64_t gmOffsetLse = lseBOffset +                                        // B 偏移
-                                   static_cast<uint64_t>(qNStartIdx * totalQTokens) +  // N 偏移
-                                   static_cast<uint64_t>(qSBlockIdx * curQSBlockTile); // S 偏移
+            uint64_t gmOffsetLse = lseBOffset +                // B 偏移
+                                   qNStartIdx * totalQTokens + // N 偏移
+                                   qSStartIdx;                 // S 偏移
+
+            uint64_t gmOffsetDrop = dropBOffset +                         // B 偏移
+                                    qNStartIdx * strideDrop +             // N 偏移
+                                    qSStartIdx * CeilDiv(maxKvSeqlen, 8); // S(Q) 偏移
 
             uint32_t qSBlockSize = (qSBlockIdx == curQSBlockNum - 1) // 处理尾块
-                                       ? (qSeqlen - qSBlockIdx * curQSBlockTile)
+                                       ? (qSeqlen - qSStartIdx)
                                        : curQSBlockTile;
             uint32_t qNBlockSize = (qNBlockIdxCurGroup == qNBlockNumPerGroup - 1)
                                        ? (groupSize - qNBlockIdxCurGroup * curQNBlockTile)
                                        : curQNBlockTile;
             uint32_t rowNum = qSBlockSize * qNBlockSize; // task 的 Q 行数
 
-            uint32_t noSkipKvS = kvSeqlen; // task 计算的 KV 序列长度
-            if (maskType != 0) {           // 因果掩码，Q 只能看到之前的 KV
+            uint32_t noSkipKvS = kvSeqlen;             // task 计算的 KV 序列长度
+            if (MASK_TYPE_ == MaskType::MASK_CAUSAL) { // 因果掩码，Q 只能看到之前的 KV
                 uint32_t diffS = kvSeqlen > qSeqlen ? kvSeqlen - qSeqlen : 0;
                 noSkipKvS = (qSBlockIdx + 1) * curQSBlockTile + // 当前分块最后一个 Q 的 S 维索引
                             diffS;                              // Q 与 KV 的 S 维差值
@@ -323,8 +332,7 @@ public:
                         stackSeqTile = MAX_KV_STACK_LEN;
                     }
                     uint32_t curStackTileMod = kvSIdx % (PRE_LAUNCH + 1); // 环形复用 GM 空间
-                    uint64_t gmOffsetSTmp =
-                        static_cast<uint64_t>((coreIdx * (PRE_LAUNCH + 1) + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB);
+                    uint64_t gmOffsetSTmp = (coreIdx * (PRE_LAUNCH + 1) + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
                     LayoutS layoutSTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
 
@@ -345,31 +353,31 @@ public:
                         uint64_t gmOffsetPTmp = gmOffsetSTmp;
                         uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN;
                         uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;
+                        epilogueOnlineSoftmax.set_gmOffsetDrop(gmOffsetDrop + kvSStartIdx / 8);
+                        epilogueOnlineSoftmax.set_gmOffsetP(gmOffsetP + kvSStartIdx);
                         if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
                             uint32_t triUp = noSkipKvS - qSBlockSize; // 第一个需要部分掩码的 KV 索引
                             uint32_t triDown = noSkipKvS;             // 第一个完全被掩码的 KV 索引
                             if (triUp < kvSEndIdx - 1) {
                                 // KV 分块内需要掩码
                                 epilogueOnlineSoftmax(
-                                    gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], gMask, gP, gmOffsetP + kvSStartIdx,
-                                    layoutPTmp, layoutSTmp, layoutMask, actualBlockShapeQK, (kvSIdx == 0), qSBlockSize,
-                                    qNBlockSize, curStackTileMod, qkReady, triUp, triDown, kvSStartIdx, kvSEndIdx,
-                                    maxKvSeqlen, strideP);
+                                    gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], gMask, layoutPTmp, layoutSTmp, layoutMask,
+                                    actualBlockShapeQK, (kvSIdx == 0), qSBlockSize, qNBlockSize, curStackTileMod,
+                                    qkReady, triUp, triDown, kvSStartIdx, kvSEndIdx);
                             } else {
                                 // KV 分块内无需掩码
                                 uint32_t noMaskStackSeqNum = (triUp + 1) / MAX_KV_STACK_LEN;
                                 Arch::CrossCoreWaitFlag(qkReady);
                                 epilogueOnlineSoftmax(
-                                    gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], gP, gmOffsetP + kvSStartIdx, layoutPTmp,
-                                    layoutSTmp, actualBlockShapeQK, (kvSIdx == 0), (kvSIdx == noMaskStackSeqNum - 1),
-                                    curStackTileMod, qSBlockSize, maxKvSeqlen, strideP);
+                                    gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], layoutPTmp, layoutSTmp,
+                                    actualBlockShapeQK, (kvSIdx == 0), (kvSIdx == noMaskStackSeqNum - 1),
+                                    curStackTileMod, qSBlockSize);
                             }
                         } else {
                             Arch::CrossCoreWaitFlag(qkReady);
                             epilogueOnlineSoftmax(
-                                gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], gP, gmOffsetP + kvSStartIdx, layoutPTmp,
-                                layoutSTmp, actualBlockShapeQK, (kvSIdx == 0), 0, curStackTileMod, qSBlockSize,
-                                maxKvSeqlen, strideP);
+                                gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], layoutPTmp, layoutSTmp, actualBlockShapeQK,
+                                (kvSIdx == 0), 0, curStackTileMod, qSBlockSize);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }
@@ -383,10 +391,9 @@ public:
                         stackSeqTile = MAX_KV_STACK_LEN;
                     }
                     uint32_t curStackTileMod = nowkvSIdx % (PRE_LAUNCH + 1);
-                    uint64_t gmOffsetOTmp =
-                        static_cast<uint64_t>((coreIdx * (PRE_LAUNCH + 1) + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB);
+                    uint64_t gmOffsetOTmp = (coreIdx * (PRE_LAUNCH + 1) + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapePV{rowNum, embedV, stackSeqTile};
-                    LayoutOTmp layoutOTmp(rowNum, embedV, embedRoundV);
+                    LayoutOTmp layoutOTmp(rowNum, embedV, embedVRound);
 
                     if ASCEND_IS_AIC {
                         LayoutP layoutPTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
@@ -407,7 +414,7 @@ public:
                         LayoutO layoutO(qSeqlen, qHeads * embed);
                         LayoutUpdate layoutUpdate(rowNum, embed, embedRound);
                         LayoutLse layoutLse(qHeads, totalQTokens);
-                        uint64_t gmOffsetUpdate = static_cast<uint64_t>(coreIdx * WORKSPACE_BLOCK_SIZE_DB);
+                        uint64_t gmOffsetUpdate = coreIdx * WORKSPACE_BLOCK_SIZE_DB;
 
                         Arch::CrossCoreWaitFlag(pvReady);
                         epilogueRescaleO(
@@ -476,7 +483,8 @@ private:
 };
 
 template <
-    typename INPUT_DTYPE_, bool PAGED_CACHE_FLAG_, MaskType MASK_TYPE_, InputLayout INPUT_LAYOUT_, bool RETURN_SOFTMAX_>
+    typename INPUT_DTYPE_, bool PAGED_CACHE_FLAG_, MaskType MASK_TYPE_, InputLayout INPUT_LAYOUT_, bool RETURN_SOFTMAX_,
+    bool HAS_DROPOUT_>
 CATLASS_GLOBAL void FAInfer(
     uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
     GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling)
@@ -506,7 +514,7 @@ CATLASS_GLOBAL void FAInfer(
     using ElementUpdate = float;
     using LayoutUpdate = layout::RowMajor;
 
-    using DispatchPolicyQK = Gemm::MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, false>;
+    using DispatchPolicyQK = Gemm::MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_>;
     using L1TileShapeQK = GemmShape<Q_TILE_CEIL, 128, 128>;
     using L0TileShapeQK = GemmShape<128, 128, 128>;
     using QType = Gemm::GemmType<ElementQ, LayoutQ>;
@@ -514,19 +522,19 @@ CATLASS_GLOBAL void FAInfer(
     using SType = Gemm::GemmType<ElementS, LayoutS>;
     using BlockMmadQK = Gemm::Block::BlockMmad<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, QType, KType, SType>;
 
-    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT<RETURN_SOFTMAX_>;
+    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT<RETURN_SOFTMAX_, HAS_DROPOUT_>;
     using PType = Gemm::GemmType<ElementP, LayoutP>;
-    using maskType = Gemm::GemmType<ElementMask, LayoutMask>;
-    using EpilogueOnlineSoftmax = Epilogue::Block::BlockEpilogue<DispatchPolicyOnlineSoftmax, PType, SType, maskType>;
+    using MaskType = Gemm::GemmType<ElementMask, LayoutMask>;
+    using EpilogueOnlineSoftmax = Epilogue::Block::BlockEpilogue<DispatchPolicyOnlineSoftmax, PType, SType, MaskType>;
 
-    using DispatchPolicyPV = Gemm::MmadAtlasA2FAIPVT<PAGED_CACHE_FLAG_, false>;
+    using DispatchPolicyPV = Gemm::MmadAtlasA2FAIPVT<PAGED_CACHE_FLAG_>;
     using L1TileShapePV = GemmShape<128, 128, 256>;
     using L0TileShapePV = GemmShape<128, 128, 128>;
     using VType = Gemm::GemmType<ElementV, LayoutV>;
     using OTmpType = Gemm::GemmType<ElementOTmp, LayoutOTmp>;
     using BlockMmadPV = Gemm::Block::BlockMmad<DispatchPolicyPV, L1TileShapePV, L0TileShapePV, PType, VType, OTmpType>;
 
-    using DispatchPolicyRescaleO = Epilogue::EpilogueAtlasA2RescaleOT;
+    using DispatchPolicyRescaleO = Epilogue::EpilogueAtlasA2RescaleOT<HAS_DROPOUT_>;
     using OType = Gemm::GemmType<ElementO, LayoutO>;
     using OUpdateType = Gemm::GemmType<ElementUpdate, LayoutUpdate>;
     using LseType = Gemm::GemmType<ElementLse, LayoutLse>;

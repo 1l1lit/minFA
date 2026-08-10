@@ -18,14 +18,15 @@ struct FAInferTilingData {
     uint32_t kvHeads;
     uint32_t batch;
     uint32_t maxNumBlocksPerBatch;
-    uint32_t maskType;
     uint64_t mm1OutSize;
     uint64_t smOnlineOutSize;
     uint64_t mm2OutSize;
     uint64_t UpdateSize;
     uint64_t workspaceSize;
     float scaleValue;
+    float dropoutValue;
     GM_ADDR pDevice = nullptr;
+    GM_ADDR dropMaskDevice = nullptr;
 
     uint32_t get_numHeads() const { return numHeads; }
     uint32_t get_embeddingSize() const { return embeddingSize; }
@@ -37,14 +38,15 @@ struct FAInferTilingData {
     uint32_t get_kvHeads() const { return kvHeads; }
     uint32_t get_batch() const { return batch; }
     uint32_t get_maxNumBlocksPerBatch() const { return maxNumBlocksPerBatch; }
-    uint32_t get_maskType() const { return maskType; }
     uint64_t get_mm1OutSize() const { return mm1OutSize; }
     uint64_t get_smOnlineOutSize() const { return smOnlineOutSize; }
     uint64_t get_mm2OutSize() const { return mm2OutSize; }
     uint64_t get_UpdateSize() const { return UpdateSize; }
     uint64_t get_workspaceSize() const { return workspaceSize; }
     float get_scaleValue() const { return scaleValue; }
+    float get_dropoutValue() const { return dropoutValue; }
     GM_ADDR get_pDevice() const { return pDevice; }
+    GM_ADDR get_dropMaskDevice() const { return dropMaskDevice; }
 
     void set_numHeads(uint32_t value) { numHeads = value; }
     void set_embeddingSize(uint32_t value) { embeddingSize = value; }
@@ -56,14 +58,15 @@ struct FAInferTilingData {
     void set_kvHeads(uint32_t value) { kvHeads = value; }
     void set_batch(uint32_t value) { batch = value; }
     void set_maxNumBlocksPerBatch(uint32_t value) { maxNumBlocksPerBatch = value; }
-    void set_maskType(uint32_t value) { maskType = value; }
     void set_mm1OutSize(uint64_t value) { mm1OutSize = value; }
     void set_smOnlineOutSize(uint64_t value) { smOnlineOutSize = value; }
     void set_mm2OutSize(uint64_t value) { mm2OutSize = value; }
     void set_UpdateSize(uint64_t value) { UpdateSize = value; }
     void set_workspaceSize(uint64_t value) { workspaceSize = value; }
     void set_scaleValue(float value) { scaleValue = value; }
+    void set_dropoutValue(float value) { dropoutValue = value; }
     void set_pDevice(GM_ADDR value) { pDevice = value; }
+    void set_dropMaskDevice(GM_ADDR value) { dropMaskDevice = value; }
 };
 
 #endif

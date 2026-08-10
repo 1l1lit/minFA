@@ -23,13 +23,13 @@ using namespace KernelCommon;
 
 namespace Catlass::Gemm::Block {
 template <
-    bool PAGED_CACHE_FLAG_, bool ENABLE_UNIT_FLAG_, class L1TileShape_, class L0TileShape_, class AType_, class BType_,
-    class CType_, class BiasType_, class TileCopy_, class TileMmad_>
+    bool PAGED_CACHE_FLAG_, class L1TileShape_, class L0TileShape_, class AType_, class BType_, class CType_,
+    class BiasType_, class TileCopy_, class TileMmad_>
 struct BlockMmad<
-    MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1TileShape_, L0TileShape_, AType_, BType_, CType_,
-    BiasType_, TileCopy_, TileMmad_> {
+    MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_>, L1TileShape_, L0TileShape_, AType_, BType_, CType_, BiasType_, TileCopy_,
+    TileMmad_> {
 public:
-    using DispatchPolicy = MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>;
+    using DispatchPolicy = MmadAtlasA2FAIQKT<PAGED_CACHE_FLAG_>;
     using ArchTag = Arch::AtlasA2;
 
     using L1TileShape = L1TileShape_;
