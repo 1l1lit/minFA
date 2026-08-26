@@ -10,30 +10,27 @@ def run_fwd():
     标准 Flash Attention 前向推理
     输入形状: (batch_size, seqlen, nheads, headdim)
     """
-    batch_size, seqlen, nheads, headdim = 1, 16, 1, 16
+    batch_size, seqlen, nheads, nheadskv, headdim = 320, 150, 24, 4, 128
     
     # 随机初始化 Q, K, V
     q = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
-    k = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
-    v = torch.randn(batch_size, seqlen, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    k = torch.randn(batch_size, seqlen, nheadskv, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    v = torch.randn(batch_size, seqlen, nheadskv, headdim, device='npu', dtype=torch.float16, requires_grad=False)
     
     # 调用接口
-    output, _, p = flash_attn_func(
+    output = flash_attn_func(
         q=q,
         k=k,
         v=v,
-        dropout_p=0.5,
+        dropout_p=0.0,
         softmax_scale=None,
         causal=False,
         window_size=(-1, -1),
         softcap=0.0,
         alibi_slopes=None,
         deterministic=False,
-        return_attn_probs=True
+        return_attn_probs=False
     )
-
-    print(p)
-
     return output
 
 def run_varlen_fwd():
@@ -41,20 +38,20 @@ def run_varlen_fwd():
     变长序列 Flash Attention 前向推理
     输入形状: (total_tokens, nheads, headdim)
     """
-    max_seqlen = 128
-    nheads, headdim = 1, 64
+    max_seqlen = 512
+    nheads, nheadskv, headdim = 24, 4, 128
     
-    # 模拟变长序列长度，例如 [100, 128]
-    seqlens = [100, 128]
+    # 模拟变长序列长度
+    seqlens = [32, 32, 32, 150, 512]
     total_tokens = sum(seqlens)
     
-    # 构建 cu_seqlens: [0, 100, 228]
+    # 构建 cu_seqlens
     cu_seqlens = torch.tensor([0] + seqlens, dtype=torch.int32, device='npu')
     
     # 随机初始化 Q, K, V (packed format)
     q = torch.randn(total_tokens, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
-    k = torch.randn(total_tokens, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
-    v = torch.randn(total_tokens, nheads, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    k = torch.randn(total_tokens, nheadskv, headdim, device='npu', dtype=torch.float16, requires_grad=False)
+    v = torch.randn(total_tokens, nheadskv, headdim, device='npu', dtype=torch.float16, requires_grad=False)
     
     output = flash_attn_varlen_func(
         q=q,
@@ -80,18 +77,18 @@ def run_kv_cache():
     带 KV Cache 的推理模式
     用于自回归生成，更新 cache 并计算 attention
     """
-    batch_size, seqlen_q, nheads, headdim = 2, 1, 8, 64 # seqlen_q=1 表示单步解码
+    batch_size, seqlen_q, nheads, nheadskv, headdim = 320, 1, 24, 4, 128 # seqlen_q=1 表示单步解码
     seqlen_k_cache = 1024 # 缓存的最大长度
     
     # 1. 初始化 Cache (预先分配好内存)
     # 形状: (batch_size, max_seqlen, nheads, headdim)
-    k_cache = torch.zeros(batch_size, seqlen_k_cache, nheads, headdim, device='npu', dtype=torch.float16)
-    v_cache = torch.zeros(batch_size, seqlen_k_cache, nheads, headdim, device='npu', dtype=torch.float16)
+    k_cache = torch.zeros(batch_size, seqlen_k_cache, nheadskv, headdim, device='npu', dtype=torch.float16)
+    v_cache = torch.zeros(batch_size, seqlen_k_cache, nheadskv, headdim, device='npu', dtype=torch.float16)
     
     # 2. 初始化当前 Step 的输入
     q = torch.randn(batch_size, seqlen_q, nheads, headdim, device='npu', dtype=torch.float16)
-    k = torch.randn(batch_size, seqlen_q, nheads, headdim, device='npu', dtype=torch.float16)
-    v = torch.randn(batch_size, seqlen_q, nheads, headdim, device='npu', dtype=torch.float16)
+    k = torch.randn(batch_size, seqlen_q, nheadskv, headdim, device='npu', dtype=torch.float16)
+    v = torch.randn(batch_size, seqlen_q, nheadskv, headdim, device='npu', dtype=torch.float16)
     
     # 3. 记录当前缓存的序列长度 (用于指示写入位置)
     # 假设当前缓存里已经有 10 个 token
@@ -123,8 +120,8 @@ def run_kv_cache():
 
 def main():
     try:
-        run_fwd()
-        # run_varlen_fwd()
+        # run_fwd()
+        run_varlen_fwd()
         # run_kv_cache()
         return 0
     except Exception as e:

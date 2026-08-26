@@ -10,7 +10,6 @@
 struct FAInferTilingData {
     uint32_t numHeads;
     uint32_t embeddingSize;
-    uint32_t embeddingSizeV;
     uint32_t numBlocks;
     uint32_t blockSize;
     uint32_t maxQSeqlen;
@@ -24,13 +23,9 @@ struct FAInferTilingData {
     uint64_t UpdateSize;
     uint64_t workspaceSize;
     float scaleValue;
-    float dropoutValue;
-    GM_ADDR pDevice = nullptr;
-    GM_ADDR dropMaskDevice = nullptr;
 
     uint32_t get_numHeads() const { return numHeads; }
     uint32_t get_embeddingSize() const { return embeddingSize; }
-    uint32_t get_embeddingSizeV() const { return embeddingSizeV; }
     uint32_t get_numBlocks() const { return numBlocks; }
     uint32_t get_blockSize() const { return blockSize; }
     uint32_t get_maxQSeqlen() const { return maxQSeqlen; }
@@ -44,13 +39,9 @@ struct FAInferTilingData {
     uint64_t get_UpdateSize() const { return UpdateSize; }
     uint64_t get_workspaceSize() const { return workspaceSize; }
     float get_scaleValue() const { return scaleValue; }
-    float get_dropoutValue() const { return dropoutValue; }
-    GM_ADDR get_pDevice() const { return pDevice; }
-    GM_ADDR get_dropMaskDevice() const { return dropMaskDevice; }
 
     void set_numHeads(uint32_t value) { numHeads = value; }
     void set_embeddingSize(uint32_t value) { embeddingSize = value; }
-    void set_embeddingSizeV(uint32_t value) { embeddingSizeV = value; }
     void set_numBlocks(uint32_t value) { numBlocks = value; }
     void set_blockSize(uint32_t value) { blockSize = value; }
     void set_maxQSeqlen(uint32_t value) { maxQSeqlen = value; }
@@ -64,9 +55,6 @@ struct FAInferTilingData {
     void set_UpdateSize(uint64_t value) { UpdateSize = value; }
     void set_workspaceSize(uint64_t value) { workspaceSize = value; }
     void set_scaleValue(float value) { scaleValue = value; }
-    void set_dropoutValue(float value) { dropoutValue = value; }
-    void set_pDevice(GM_ADDR value) { pDevice = value; }
-    void set_dropMaskDevice(GM_ADDR value) { dropMaskDevice = value; }
 };
 
 #endif

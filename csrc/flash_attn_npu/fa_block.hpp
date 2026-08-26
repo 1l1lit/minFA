@@ -26,16 +26,9 @@ struct MmadAtlasA2FAIQKT : public Gemm::MmadAtlasA2 {
 } // namespace Catlass::Gemm
 
 namespace Catlass::Epilogue {
-template <bool RETURN_SOFTMAX_ = false, bool HAS_DROPOUT_ = false>
-struct EpilogueAtlasA2OnlineSoftmaxT {
-    static constexpr bool RETURN_SOFTMAX = RETURN_SOFTMAX_;
-    static constexpr bool HAS_DROPOUT = HAS_DROPOUT_;
-};
+struct EpilogueAtlasA2OnlineSoftmaxT {};
 
-template <bool HAS_DROPOUT_ = false>
-struct EpilogueAtlasA2RescaleOT {
-    static constexpr bool HAS_DROPOUT = HAS_DROPOUT_;
-};
+struct EpilogueAtlasA2RescaleOT {};
 } // namespace Catlass::Epilogue
 
 #endif // FAI_BLOCK_HPP
