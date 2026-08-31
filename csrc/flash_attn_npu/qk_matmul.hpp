@@ -113,7 +113,7 @@ public:
             qSBlockSize,     // ndNum
             qHeads * embed,  // srcNdMatrixStride
             qSBlockSize,     // dstNzNStride
-            BLOCK_SIZE,      // dstNzMatrixStride
+            NUM_16,          // dstNzMatrixStride
             rowNumRound);    // dstNzC0Stride
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
@@ -133,22 +133,23 @@ public:
             blockStartOffset = 0;
         }
 
-        uint32_t nL1Loop = CeilDiv(stackSeqTile, l1NDynamic);
         uint32_t curBlockIdx = 0;
-        uint32_t gBOffset = 0;
-        uint32_t nActual = 0;
-        LayoutBInL1 layoutBInL1;
+        uint32_t mL0Loop = CeilDiv(rowNum, L0TileShape::M);
+        uint32_t nL1Loop = CeilDiv(stackSeqTile, l1NDynamic);
+        uint32_t kL0Loop = CeilDiv(embed, L0TileShape::K);
         for (uint32_t nL1Idx = 0; nL1Idx < nL1Loop; nL1Idx++) {
-            if constexpr (PAGED_CACHE_FLAG_) {
-                nActual = (nL1Idx == nL1Loop - 1) ? (stackSeqTile - nL1Idx * l1NDynamic) : l1NDynamic;
-                layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(embed, nActual);
+            uint32_t nActual = (nL1Idx == nL1Loop - 1) ? (stackSeqTile - nL1Idx * l1NDynamic) : l1NDynamic;
+            LayoutBInL1 layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(embed, nActual);
 
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BPingPong);
+            // K: GM -> L1
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
+                l1BPingPong); // 等待 L1 -> L0 搬运完成，再进行下一轮 GM -> L1 搬运
+            if constexpr (PAGED_CACHE_FLAG_) {
                 uint32_t nowLen = 0;
                 for (uint32_t kvL1Len = 0; kvL1Len < nActual; kvL1Len += nowLen) {
                     uint32_t nowNIdx = nIdx * maxKStackLen / blockSize + curBlockIdx;
                     nowLen = Min(blockSize - blockStartOffset, nActual - kvL1Len);
-                    gBOffset = (gBlockTable.GetValue(nowNIdx) * blockSize + blockStartOffset) * strideK;
+                    uint32_t gBOffset = (gBlockTable.GetValue(nowNIdx) * blockSize + blockStartOffset) * strideK;
                     auto layoutBTile = layoutB.GetTileLayout(MakeCoord(embed, nowLen));
                     MatrixCoord l1BTileCoord{0, kvL1Len};
                     auto l1BTile = l1BTensor[l1BPingPong][layoutBInL1.GetOffset(l1BTileCoord)];
@@ -165,27 +166,18 @@ public:
                         blockStartOffset += nowLen;
                     }
                 }
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BPingPong);
             } else {
-                nActual = (nL1Idx == nL1Loop - 1) ? (stackSeqTile - nL1Idx * l1NDynamic) : l1NDynamic;
-                layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(embed, nActual);
-                gBOffset = (nIdx * maxKStackLen + nL1Idx * l1NDynamic) * strideK;
+                uint32_t gBOffset = (nIdx * maxKStackLen + nL1Idx * l1NDynamic) * strideK;
                 auto layoutBTile = layoutB.GetTileLayout(MakeCoord(embed, nActual));
-
-                // K: GM -> L1
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
-                    l1BPingPong); // 等待 L1 -> L0 搬运完成，再进行下一轮 GM -> L1 搬运
                 copyGmToL1B(
                     l1BTensor[l1BPingPong], // dstTensor
                     gB[gBOffset],           // srcTensor
                     layoutBInL1,            // layoutDst
                     layoutBTile);           // layoutSrc
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(
-                    l1BPingPong); // 通知 GM -> L1 搬运完成，可以进行 L1 -> L0 搬运
             }
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(
+                l1BPingPong); // 通知 GM -> L1 搬运完成，可以进行 L1 -> L0 搬运
 
-            uint32_t mL0Loop = CeilDiv(rowNum, L0TileShape::M);
-            uint32_t kL0Loop = CeilDiv(embed, L0TileShape::K);
             for (uint32_t mL0Idx = 0; mL0Idx < mL0Loop; mL0Idx++) {
                 uint32_t mL0Actual = (mL0Idx == mL0Loop - 1) ? (rowNum - mL0Idx * L0TileShape::M) : L0TileShape::M;
                 AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(
@@ -231,7 +223,7 @@ public:
                     AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
 
                     // Q @ K = S
-                    uint32_t mL0Align = RoundUp(mL0Actual, BLOCK_SIZE);
+                    uint32_t mL0Align = RoundUp(mL0Actual, NUM_16);
                     tileMmad(
                         l0CTensor[l0CPingPong],  // l0CTensor
                         l0ATensor[l0ABPingPong], // l0ATensor

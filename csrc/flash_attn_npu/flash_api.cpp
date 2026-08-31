@@ -135,11 +135,11 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     tiling_cpu_ptr->set_maxQSeqlen(seqlen_q);
 
     uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
-    uint64_t PRE_LAUNCH = KernelCommon::PRE_LAUNCH;
-    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
-    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * (PRE_LAUNCH + 1);
-    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
+    uint64_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
+    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
+    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
@@ -273,11 +273,11 @@ std::vector<at::Tensor> mha_fwd(
     // set worksapce
     uint32_t coreNum = platform_ascendc::PlatformAscendCManager::GetInstance()->GetCoreNumAic();
     uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
-    uint64_t PRE_LAUNCH = KernelCommon::PRE_LAUNCH;
-    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
-    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * (PRE_LAUNCH + 1);
-    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
+    uint64_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
+    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
+    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
@@ -419,11 +419,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
     tiling_cpu_ptr->set_maxQSeqlen(max_seqlen_q);
 
     uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
-    uint64_t PRE_LAUNCH = KernelCommon::PRE_LAUNCH;
-    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
-    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * (PRE_LAUNCH + 1);
-    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * (PRE_LAUNCH + 1);
+    uint64_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
+    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
+    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 

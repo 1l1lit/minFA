@@ -132,7 +132,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
@@ -146,22 +146,13 @@ public:
         }
 
         if ASCEND_IS_AIC {
-            uint32_t kDynNum = RoundUp(embed, NUM_128); // K 对应 embed 维度，不能太小
-            kDynNum = Max(kDynNum, NUM_256);            // 至少为 256
-
-            uint32_t maxQL1Size = kDynNum * Q_TILE_CEIL * sizeof(ElementQ);    // Q 的预留 L1 空间
-            uint32_t maxVL1Size = embed * MAX_KV_STACK_LEN * sizeof(ElementV); // V 的预留 L1 空间
-            uint32_t maxKPL1Size = ArchTag::L1_SIZE - maxQL1Size - maxVL1Size; // 剩余的 L1 空间用于 K 和 P 的复用
-            uint32_t maxNDynNum = RoundDown(
-                maxKPL1Size / sizeof(ElementK) / kDynNum / DOUBLE_BUFFER, NUM_32); // N 对应 K 和 V 的序列长度，不能过大
-            uint32_t nDynNum = Min(maxNDynNum, L1_MAX_N_NUM);                      // 最大为 L1_MAX_N_NUM
-            nDynNum = L1_MAX_N_NUM % nDynNum != 0 ? RoundDown((nDynNum - 1), NUM_32) : nDynNum;
-
+            uint32_t kDynNum = RoundUp(embed, NUM_128);                           // K 对应 D 维度
+            uint32_t nDynNum = NUM_128;                                           // N 对应 KV 的序列长度
             uint32_t kPVDynNum = nDynNum * kDynNum / BlockMmadPV::L1TileShape::M; // P 复用 K 的 L1 空间
-            uint32_t qkL1Size = BlockMmadQK::L1TileShape::M * kDynNum * sizeof(ElementQ);
+            uint32_t maxQL1Size = kDynNum * Q_TILE_CEIL * sizeof(ElementQ);       // Q 的预留 L1 空间
 
             blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN);
-            blockMmadPV.init(resource, kPVDynNum, MAX_KV_STACK_LEN, qkL1Size);
+            blockMmadPV.init(resource, kPVDynNum, MAX_KV_STACK_LEN, maxQL1Size);
         } else { // ASCEND_IS_AIV
             epilogueOnlineSoftmax.init(resource, scaleValue);
             epilogueRescaleO.init(resource);
@@ -171,8 +162,9 @@ public:
         uint32_t strideK = kvHeads * embed;
         uint32_t strideV = kvHeads * embed;
         uint32_t strideO = qHeads * embed;
-        uint32_t embedRound = RoundUp(embed, BLOCK_SIZE);
+        uint32_t embedRound = RoundUp(embed, NUM_16);
         uint32_t groupSize = qHeads / kvHeads;
+        uint32_t stackSeqTile = MAX_KV_STACK_LEN;
 
         uint64_t qBOffset = 0;
         uint64_t kBOffset = 0;
@@ -184,8 +176,6 @@ public:
         uint32_t preTotalTaskNum = 0;
         uint32_t curTotalTaskNum = 0;
         uint32_t curBatch = 0;
-        uint32_t qSeqlen = 0;
-        uint32_t kvSeqlen = 0;
         uint32_t curQNBlockTile = 0;
         uint32_t qNBlockNumPerGroup = 0;
         uint32_t curQNBlockNum = 0;
@@ -207,120 +197,140 @@ public:
             coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
         }
 
-        for (uint32_t taskIdx = coreIdx; /* 通过 if break 出循环 */; taskIdx += coreNum) {
-            while (curBatch < batch && taskIdx >= curTotalTaskNum) {
-                if (curBatch > 0) {
-                    preTotalTaskNum = curTotalTaskNum;
-                    qBOffset += qSeqlen * strideQ;
-                    if constexpr (!PAGED_CACHE_FLAG_) {
-                        kBOffset += kvSeqlen * strideK;
-                        vBOffset += kvSeqlen * strideV;
-                    } else {
-                        blockBOffset += maxNumBlocksPerBatch;
+        uint32_t taskIdx = coreIdx;
+        bool launchNextTask = true;
+        for (uint32_t loopNum = 0; launchNextTask; SwapTask()) {
+            for (launchNextTask = false; kvSIdx < kvSLoop + PRE_LAUNCH; kvSIdx++, loopNum++) {
+                // *** PRE LAUNCH ***
+                if (kvSIdx == kvSLoop) {
+                    SwapTask();
+                    qSeqlen = preTaskInfo.qSeqlen;
+                    kvSeqlen = preTaskInfo.kvSeqlen;
+                    while (curBatch < batch && taskIdx >= curTotalTaskNum) {
+                        if (curBatch > 0) {
+                            preTotalTaskNum = curTotalTaskNum;
+                            qBOffset += qSeqlen * strideQ;
+                            if constexpr (!PAGED_CACHE_FLAG_) {
+                                kBOffset += kvSeqlen * strideK;
+                                vBOffset += kvSeqlen * strideV;
+                            } else {
+                                blockBOffset += maxNumBlocksPerBatch;
+                            }
+                            oBOffset += qSeqlen * strideO;
+                            // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
+                            if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
+                                lseBOffset += qSeqlen;
+                            } else {
+                                lseBOffset += qSeqlen * qHeads;
+                            }
+                        }
+
+                        qSeqlen = maxQSeqlen;
+                        kvSeqlen = gActualKvseqlen.GetValue(curBatch);
+                        if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
+                            qSeqlen = gActualQseqlen.GetValue(curBatch + 1) - gActualQseqlen.GetValue(curBatch);
+                            if constexpr (!PAGED_CACHE_FLAG_) {
+                                kvSeqlen = gActualKvseqlen.GetValue(curBatch + 1) - gActualKvseqlen.GetValue(curBatch);
+                            }
+                        }
+                        curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);     // Q 的 N 维分块大小
+                        qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile); // 每个 group 的 N 维分块数量，向上取整
+                        curQNBlockNum = qNBlockNumPerGroup * kvHeads;            // Q 的 N 维分块数量
+                        curQSBlockTile = GetQSBlockTile();                       // Q 的 S 维分块大小
+                        curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);        // Q 的 S 维分块数量，向上取整
+                        curTotalTaskNum += curQNBlockNum * curQSBlockNum;        // 新增当前 batch 的 Q 任务数量
+                        curBatch++;
                     }
-                    oBOffset += qSeqlen * strideO;
-                    // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
-                    if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
-                        lseBOffset += qSeqlen;
+
+                    if (taskIdx < curTotalTaskNum) {
+                        uint32_t taskIdxCurBatch = taskIdx - preTotalTaskNum;
+                        uint32_t qSBlockIdx = taskIdxCurBatch / curQNBlockNum;         // task 的 S 维分块索引
+                        uint32_t qNBlockIdx = taskIdxCurBatch % curQNBlockNum;         // task 的 N 维分块索引
+                        uint32_t qSStartIdx = qSBlockIdx * curQSBlockTile;             // Q 的 S 维元素起始索引
+                        uint32_t qNBlockIdxCurGroup = qNBlockIdx % qNBlockNumPerGroup; // Q 的 group 内 N 维分块索引
+                        uint32_t kvNIdx = qNBlockIdx / qNBlockNumPerGroup;             // Q 对应 KV 的 N 维分块索引
+                        uint32_t qNStartIdx =
+                            kvNIdx * groupSize + qNBlockIdxCurGroup * curQNBlockTile; // Q 的 N 维元素起始索引
+
+                        gmOffsetQ = qBOffset +             // B 偏移
+                                    qSStartIdx * strideQ + // S 偏移
+                                    qNStartIdx * embed;    // N 偏移
+
+                        gmOffsetK = kBOffset +      // B 偏移
+                                    kvNIdx * embed; // N 偏移，在后面遍历 S 维
+
+                        gmOffsetV = vBOffset +      // B 偏移
+                                    kvNIdx * embed; // N 偏移，在后面遍历 S 维
+
+                        gmOffsetO = oBOffset +             // B 偏移
+                                    qSStartIdx * strideO + // S 偏移
+                                    qNStartIdx * embed;    // N 偏移
+
+                        gmOffsetLse = lseBOffset +                // B 偏移
+                                      qNStartIdx * totalQTokens + // N 偏移
+                                      qSStartIdx;                 // S 偏移
+
+                        gmOffsetBlock = blockBOffset;
+
+                        qSBlockSize = (qSBlockIdx == curQSBlockNum - 1) ? (qSeqlen - qSStartIdx) : curQSBlockTile;
+                        qNBlockSize = (qNBlockIdxCurGroup == qNBlockNumPerGroup - 1)
+                                          ? (groupSize - qNBlockIdxCurGroup * curQNBlockTile)
+                                          : curQNBlockTile;
+                        rowNum = qSBlockSize * qNBlockSize; // curTask 的 Q 行数
+
+                        noSkipKvS = kvSeqlen;                      // curTask 计算的 KV 序列长度
+                        if (MASK_TYPE_ == MaskType::MASK_CAUSAL) { // 因果掩码，Q 只能看到之前的 KV
+                            uint32_t diffS = kvSeqlen > qSeqlen ? kvSeqlen - qSeqlen : 0;
+                            noSkipKvS = (qSBlockIdx + 1) * curQSBlockTile + // 当前分块最后一个 Q 的 S 维索引
+                                        diffS;                              // Q 与 KV 的 S 维差值
+                            noSkipKvS = Min(kvSeqlen, noSkipKvS);           // 不超过实际的 KV 序列长度
+                        }
+                        kvSLoop = CeilDiv(noSkipKvS, MAX_KV_STACK_LEN); // curTask 的 KV 循环分块数目
+
+                        if ASCEND_IS_AIC {
+                            layoutQTmp = LayoutQ(rowNum, embed);             // (S * N, D)
+                            layoutKTmp = LayoutK(strideK, MAX_KV_STACK_LEN); // (N * D, S)
+                            layoutVTmp = LayoutV(MAX_KV_STACK_LEN, strideV); // (S, N * D)
+                            if (loopNum == PRE_LAUNCH) {
+                                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
+                                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
+                            }
+                            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTmp, qSBlockSize, qNBlockSize, qHeads);
+                        }
+
+                        kvSIdx = 0;
+                        taskIdx += coreNum;
+                        launchNextTask = true;
                     } else {
-                        lseBOffset += qSeqlen * qHeads;
+                        SwapTask();
                     }
                 }
 
-                qSeqlen = maxQSeqlen;
-                kvSeqlen = gActualKvseqlen.GetValue(curBatch);
-                if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
-                    qSeqlen = gActualQseqlen.GetValue(curBatch + 1) - gActualQseqlen.GetValue(curBatch);
-                    if constexpr (!PAGED_CACHE_FLAG_) {
-                        kvSeqlen = gActualKvseqlen.GetValue(curBatch + 1) - gActualKvseqlen.GetValue(curBatch);
-                    }
-                }
-                curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);     // Q 的 N 维分块大小
-                qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile); // 每个 group 的 N 维分块数量，向上取整
-                curQNBlockNum = qNBlockNumPerGroup * kvHeads;            // Q 的 N 维分块数量
-                curQSBlockTile = GetQSBlockTile(kvSeqlen);               // Q 的 S 维分块大小
-                curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);        // Q 的 S 维分块数量，向上取整
-                curTotalTaskNum += curQNBlockNum * curQSBlockNum;        // 新增当前 batch 的 Q 任务数量
-                curBatch++;
-            }
-
-            if (curBatch >= batch &&          // 到达最后一个 batch，此时 curTotalTaskNum 即为 totalTaskNum
-                taskIdx >= curTotalTaskNum) { // taskIdx 超过 totalTaskNum，退出 taskIdx 的 for 循环
-                break;
-            }
-
-            uint32_t taskIdxCurBatch = taskIdx - preTotalTaskNum;
-            uint32_t qSBlockIdx = taskIdxCurBatch / curQNBlockNum;         // task 的 S 维分块索引
-            uint32_t qNBlockIdx = taskIdxCurBatch % curQNBlockNum;         // task 的 N 维分块索引
-            uint32_t qSStartIdx = qSBlockIdx * curQSBlockTile;             // Q 的 S 维元素起始索引
-            uint32_t qNBlockIdxCurGroup = qNBlockIdx % qNBlockNumPerGroup; // Q 的 group 内 N 维分块索引
-            uint32_t kvNIdx = qNBlockIdx / qNBlockNumPerGroup;             // Q 对应 KV 的 N 维分块索引
-            uint32_t qNStartIdx = kvNIdx * groupSize + qNBlockIdxCurGroup * curQNBlockTile; // Q 的 N 维元素起始索引
-
-            uint64_t gmOffsetQ = qBOffset +             // B 偏移
-                                 qSStartIdx * strideQ + // S 偏移
-                                 qNStartIdx * embed;    // N 偏移
-
-            uint64_t gmOffsetK = kBOffset +      // B 偏移
-                                 kvNIdx * embed; // N 偏移，在后面遍历 S 维
-
-            uint64_t gmOffsetV = vBOffset +      // B 偏移
-                                 kvNIdx * embed; // N 偏移，在后面遍历 S 维
-
-            uint64_t gmOffsetO = oBOffset +             // B 偏移
-                                 qSStartIdx * strideO + // S 偏移
-                                 qNStartIdx * embed;    // N 偏移
-
-            uint64_t gmOffsetLse = lseBOffset +                // B 偏移
-                                   qNStartIdx * totalQTokens + // N 偏移
-                                   qSStartIdx;                 // S 偏移
-
-            uint32_t qSBlockSize = (qSBlockIdx == curQSBlockNum - 1) // 处理尾块
-                                       ? (qSeqlen - qSStartIdx)
-                                       : curQSBlockTile;
-            uint32_t qNBlockSize = (qNBlockIdxCurGroup == qNBlockNumPerGroup - 1)
-                                       ? (groupSize - qNBlockIdxCurGroup * curQNBlockTile)
-                                       : curQNBlockTile;
-            uint32_t rowNum = qSBlockSize * qNBlockSize; // task 的 Q 行数
-
-            uint32_t noSkipKvS = kvSeqlen;             // task 计算的 KV 序列长度
-            if (MASK_TYPE_ == MaskType::MASK_CAUSAL) { // 因果掩码，Q 只能看到之前的 KV
-                uint32_t diffS = kvSeqlen > qSeqlen ? kvSeqlen - qSeqlen : 0;
-                noSkipKvS = (qSBlockIdx + 1) * curQSBlockTile + // 当前分块最后一个 Q 的 S 维索引
-                            diffS;                              // Q 与 KV 的 S 维差值
-                noSkipKvS = Min(kvSeqlen, noSkipKvS);           // 不超过实际的 KV 序列长度
-            }
-            uint32_t kvSLoopNumTotal = CeilDiv(noSkipKvS, MAX_KV_STACK_LEN); // task 的 KV 循环分块数目
-            uint32_t stackSeqTile = MAX_KV_STACK_LEN;                        // 每次循环处理的 KV 序列长度
-
-            if ASCEND_IS_AIC {
-                layoutQTmp = LayoutQ(rowNum, embed);         // (S * N, D)
-                layoutKTmp = LayoutK(strideK, stackSeqTile); // (N * D, S)
-                layoutVTmp = LayoutV(stackSeqTile, strideV); // (S, N * D)
-                blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTmp, qSBlockSize, qNBlockSize, qHeads);
-            }
-
-            for (uint32_t kvSIdx = 0; kvSIdx < kvSLoopNumTotal + PRE_LAUNCH; kvSIdx++) {
-                if (kvSIdx < kvSLoopNumTotal) {
-                    if (kvSIdx == kvSLoopNumTotal - 1) {
+                // *** QK & SM ***
+                if (kvSIdx < kvSLoop || launchNextTask) {
+                    if (kvSIdx == kvSLoop - 1) {
                         stackSeqTile = noSkipKvS - kvSIdx * MAX_KV_STACK_LEN;
                     } else {
                         stackSeqTile = MAX_KV_STACK_LEN;
                     }
-                    uint32_t curStackTileMod = kvSIdx % (PRE_LAUNCH + 1); // 环形复用 GM 空间
-                    uint64_t gmOffsetSTmp = (coreIdx * (PRE_LAUNCH + 1) + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
+                    uint32_t curStackTileMod = loopNum % DOUBLE_BUFFER; // 环形复用 GM 空间
+                    uint64_t gmOffsetSTmp = (coreIdx * DOUBLE_BUFFER + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
                     LayoutS layoutSTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
 
                     if ASCEND_IS_AIC {
                         if constexpr (PAGED_CACHE_FLAG_) {
                             blockMmadQK(
-                                gK[gmOffsetK], gSTmp[gmOffsetSTmp], gBlockTable[blockBOffset], layoutKTmp, layoutSTmp,
+                                gK[gmOffsetK], gSTmp[gmOffsetSTmp], gBlockTable[gmOffsetBlock], layoutKTmp, layoutSTmp,
                                 actualBlockShapeQK, kvSIdx, pagedBlockSize, strideK);
                         } else {
                             blockMmadQK(
                                 gK[gmOffsetK], gSTmp[gmOffsetSTmp], gBlockTable, layoutKTmp, layoutSTmp,
                                 actualBlockShapeQK, kvSIdx, pagedBlockSize, strideK);
+                        }
+                        if (loopNum == 0) {
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
@@ -329,6 +339,7 @@ public:
                         uint64_t gmOffsetPTmp = gmOffsetSTmp;
                         uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN;
                         uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;
+                        epilogueOnlineSoftmax.set_curTaskMod(curTaskMod);
                         if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
                             uint32_t triUp = noSkipKvS - qSBlockSize; // 第一个需要部分掩码的 KV 索引
                             uint32_t triDown = noSkipKvS;             // 第一个完全被掩码的 KV 索引
@@ -355,17 +366,23 @@ public:
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }
+
+                    if (launchNextTask) {
+                        kvSIdx++;
+                        SwapTask();
+                    }
                 }
 
-                if (kvSIdx >= PRE_LAUNCH) {
+                // *** PV & RS ***
+                if (loopNum >= PRE_LAUNCH) {
                     uint32_t nowKvSIdx = kvSIdx - PRE_LAUNCH;
-                    if (nowKvSIdx == kvSLoopNumTotal - 1) {
+                    if (nowKvSIdx == kvSLoop - 1) {
                         stackSeqTile = noSkipKvS - nowKvSIdx * MAX_KV_STACK_LEN;
                     } else {
                         stackSeqTile = MAX_KV_STACK_LEN;
                     }
-                    uint32_t curStackTileMod = nowKvSIdx % (PRE_LAUNCH + 1);
-                    uint64_t gmOffsetOTmp = (coreIdx * (PRE_LAUNCH + 1) + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
+                    uint32_t curStackTileMod = (loopNum - PRE_LAUNCH) % DOUBLE_BUFFER;
+                    uint64_t gmOffsetOTmp = (coreIdx * DOUBLE_BUFFER + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapePV{rowNum, embed, stackSeqTile};
                     LayoutOTmp layoutOTmp(rowNum, embed, embedRound);
 
@@ -374,7 +391,7 @@ public:
                         uint64_t gmOffsetPTmp = gmOffsetOTmp;
                         if constexpr (PAGED_CACHE_FLAG_) {
                             blockMmadPV(
-                                gPTmp[gmOffsetPTmp], gV[gmOffsetV], gOTmp[gmOffsetOTmp], gBlockTable[blockBOffset],
+                                gPTmp[gmOffsetPTmp], gV[gmOffsetV], gOTmp[gmOffsetOTmp], gBlockTable[gmOffsetBlock],
                                 layoutPTmp, layoutVTmp, layoutOTmp, actualBlockShapePV, nowKvSIdx, pagedBlockSize,
                                 strideV, softmaxReady);
                         } else {
@@ -389,12 +406,13 @@ public:
                         LayoutUpdate layoutUpdate(rowNum, embed, embedRound);
                         LayoutLse layoutLse(qHeads, totalQTokens);
                         uint64_t gmOffsetUpdate = coreIdx * WORKSPACE_BLOCK_SIZE_DB;
+                        epilogueRescaleO.set_curTaskMod(curTaskMod);
 
                         Arch::CrossCoreWaitFlag(pvReady);
                         epilogueRescaleO(
                             gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse], layoutO,
                             layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, qSBlockSize, qNBlockSize,
-                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoopNumTotal - 1), curStackTileMod);
+                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), curStackTileMod);
                     }
                 }
             }
@@ -423,7 +441,7 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
@@ -436,6 +454,49 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
         }
         AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
+private:
+    uint32_t kvSIdx = 0, kvSLoop = 0;
+    uint32_t qSeqlen, kvSeqlen, noSkipKvS;
+    uint64_t gmOffsetQ, gmOffsetK, gmOffsetV, gmOffsetO, gmOffsetLse, gmOffsetBlock;
+    uint32_t qSBlockSize, qNBlockSize, rowNum;
+
+    struct TaskInfo {
+        uint32_t kvSIdx = 0, kvSLoop = 0;
+        uint32_t qSeqlen, kvSeqlen, noSkipKvS;
+        uint64_t gmOffsetQ, gmOffsetK, gmOffsetV, gmOffsetO, gmOffsetLse, gmOffsetBlock;
+        uint32_t qSBlockSize, qNBlockSize, rowNum;
+    };
+
+    TaskInfo preTaskInfo;
+    uint32_t curTaskMod = 0;
+
+    template <typename T>
+    CATLASS_DEVICE void Swap(T& a, T& b)
+    {
+        T tmp = a;
+        a = b;
+        b = tmp;
+    }
+
+    CATLASS_DEVICE void SwapTask()
+    {
+        Swap(preTaskInfo.kvSIdx, kvSIdx);
+        Swap(preTaskInfo.kvSLoop, kvSLoop);
+        Swap(preTaskInfo.qSeqlen, qSeqlen);
+        Swap(preTaskInfo.kvSeqlen, kvSeqlen);
+        Swap(preTaskInfo.noSkipKvS, noSkipKvS);
+        Swap(preTaskInfo.gmOffsetQ, gmOffsetQ);
+        Swap(preTaskInfo.gmOffsetK, gmOffsetK);
+        Swap(preTaskInfo.gmOffsetV, gmOffsetV);
+        Swap(preTaskInfo.gmOffsetO, gmOffsetO);
+        Swap(preTaskInfo.gmOffsetLse, gmOffsetLse);
+        Swap(preTaskInfo.gmOffsetBlock, gmOffsetBlock);
+        Swap(preTaskInfo.qSBlockSize, qSBlockSize);
+        Swap(preTaskInfo.qNBlockSize, qNBlockSize);
+        Swap(preTaskInfo.rowNum, rowNum);
+        curTaskMod ^= 1;
     }
 
 private:

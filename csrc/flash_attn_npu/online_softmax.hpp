@@ -58,7 +58,7 @@ public:
         constexpr uint32_t LL_OFFSET = 10 * UB_BLK_SIZE + 10 * UB_VEC_SIZE;
 
         constexpr uint32_t TV_OFFSET = 11 * UB_BLK_SIZE + 8 * UB_VEC_SIZE;
-        constexpr uint32_t TVB_OFFSET = 11 * UB_BLK_SIZE + 12 * UB_VEC_SIZE;        
+        constexpr uint32_t TVB_OFFSET = 11 * UB_BLK_SIZE + 12 * UB_VEC_SIZE;
 
         ls = resource.ubBuf.template GetBufferByByte<float>(LS_OFFSET);
         lp = resource.ubBuf.template GetBufferByByte<ElementOutput>(LP_OFFSET);
@@ -73,6 +73,12 @@ public:
         ll = resource.ubBuf.template GetBufferByByte<float>(LL_OFFSET);
         tv = resource.ubBuf.template GetBufferByByte<float>(TV_OFFSET);
         tvb = resource.ubBuf.template GetBufferByByte<float>(TVB_OFFSET);
+    }
+
+    CATLASS_DEVICE void set_curTaskMod(uint32_t curTaskMod)
+    {
+        taskEvent = curTaskMod + 2;
+        taskOffset = curTaskMod * ((4 * UB_VEC_SIZE) / sizeof(float));
     }
 
     CATLASS_DEVICE void RowMax512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNumRound)
@@ -176,19 +182,21 @@ public:
             SetVecMaskLen(rowNum);
             // hm = max(lm, gm)
             Max<float, false>(
-                hm[coreRowOffset], lm[coreRowOffset], gm[coreRowOffset], MASK_NUL, 1, BinaryRepeatParams());
+                hm[coreRowOffset], lm[coreRowOffset], gm[taskOffset][coreRowOffset], MASK_NUL, 1, BinaryRepeatParams());
             PipeBarrier<PIPE_V>();
             // dm = gm - hm
-            Sub<float, false>(dm[dmOffset], gm[coreRowOffset], hm[coreRowOffset], MASK_NUL, 1, BinaryRepeatParams());
+            Sub<float, false>(
+                dm[taskOffset][dmOffset], gm[taskOffset][coreRowOffset], hm[coreRowOffset], MASK_NUL, 1,
+                BinaryRepeatParams());
             PipeBarrier<PIPE_V>();
             // dm = exp(dm)
-            Exp<float, false>(dm[dmOffset], dm[dmOffset], MASK_NUL, 1, UnaryRepeatParams());
+            Exp<float, false>(dm[taskOffset][dmOffset], dm[taskOffset][dmOffset], MASK_NUL, 1, UnaryRepeatParams());
             PipeBarrier<PIPE_V>();
             ResetMask();
         }
 
         // gm = hm
-        DataCopy(gm[coreRowOffset], hm[coreRowOffset], copyParams);
+        DataCopy(gm[taskOffset][coreRowOffset], hm[coreRowOffset], copyParams);
         PipeBarrier<PIPE_V>();
     }
 
@@ -286,16 +294,21 @@ public:
     {
         if (isFirstStackTile) {
             // gl = ll
-            DataCopy(gl[coreRowOffset], ll[coreRowOffset], DataCopyParams(1, rowNumRound / FLT_PER_DATABLOCK, 0, 0));
+            DataCopy(
+                gl[taskOffset][coreRowOffset], ll[coreRowOffset],
+                DataCopyParams(1, rowNumRound / FLT_PER_DATABLOCK, 0, 0));
             PipeBarrier<PIPE_V>();
         } else {
             SetVecMaskLen(rowNum);
             // gl = dm * gl
-            Mul<float, false>(gl[coreRowOffset], dm[dmOffset], gl[coreRowOffset], MASK_NUL, 1, BinaryRepeatParams());
+            Mul<float, false>(
+                gl[taskOffset][coreRowOffset], dm[taskOffset][dmOffset], gl[taskOffset][coreRowOffset], MASK_NUL, 1,
+                BinaryRepeatParams());
             PipeBarrier<PIPE_V>();
             // gl = gl + ll
             Add<float, false>(
-                gl[coreRowOffset], gl[coreRowOffset], ll[coreRowOffset], MASK_NUL, 1, BinaryRepeatParams());
+                gl[taskOffset][coreRowOffset], gl[taskOffset][coreRowOffset], ll[coreRowOffset], MASK_NUL, 1,
+                BinaryRepeatParams());
             PipeBarrier<PIPE_V>();
             ResetMask();
         }
@@ -308,28 +321,26 @@ public:
     {
         uint32_t blockLen = colNum * sizeof(ElementMask);
         uint32_t srcStride = (maskStride - colNum) * sizeof(ElementMask);
-        DataCopyPadExtParams<ElementMask> padParams(false, 0, 0, 0);
-
         uint32_t innerRowOffset = 0;
 
         if (proTokenNum != 0) {
             DataCopyPad(
                 mask[innerRowOffset], gMask[proTokenIdx * maskStride],
-                DataCopyExtParams(proTokenNum /* blockCount */, blockLen, srcStride, 0, 0), padParams);
+                DataCopyExtParams(proTokenNum, blockLen, srcStride, 0, 0), DataCopyPadExtParams<ElementMask>());
             innerRowOffset += proTokenNum * colNumRound;
         }
 
         for (uint32_t i = 0; i < integralHeadNum; i++) {
             DataCopyPad(
-                mask[innerRowOffset], gMask,
-                DataCopyExtParams(tokenNumPerHead /* blockCount */, blockLen, srcStride, 0, 0), padParams);
+                mask[innerRowOffset], gMask, DataCopyExtParams(tokenNumPerHead, blockLen, srcStride, 0, 0),
+                DataCopyPadExtParams<ElementMask>());
             innerRowOffset += tokenNumPerHead * colNumRound;
         }
 
         if (epiTokenNum != 0) {
             DataCopyPad(
-                mask[innerRowOffset], gMask, DataCopyExtParams(epiTokenNum /* blockCount */, blockLen, srcStride, 0, 0),
-                padParams);
+                mask[innerRowOffset], gMask, DataCopyExtParams(epiTokenNum, blockLen, srcStride, 0, 0),
+                DataCopyPadExtParams<ElementMask>());
         }
     }
 
@@ -420,6 +431,10 @@ public:
         uint32_t colNumPad = layoutOutput.stride(0);
         uint32_t dmOffsetCurCycle = curStackTileMod * MAX_ROW_NUM_SUB_CORE + coreRowOffset;
 
+        if (isFirstStackTile && isFirstRowLoop) {
+            WaitFlag<HardEvent::MTE3_V>(taskEvent); // 等待上个 task 的 RS 完成
+        }
+
         CalcLocalRowMax(coreRowOffset, rowNumLoopRound, colNum, colNumRound);
         UpdateGlobalRowMax(rowNumLoop, rowNumLoopRound, dmOffsetCurCycle, coreRowOffset, isFirstStackTile);
 
@@ -442,7 +457,7 @@ public:
         WaitFlag<HardEvent::V_MTE3>(pingPong);
         DataCopy(
             gOutput, lp[pingPongOffset],
-            DataCopyParams(rowNumLoop, colNumRound / BLOCK_SIZE, 0, (colNumPad - colNumRound) / BLOCK_SIZE));
+            DataCopyParams(rowNumLoop, colNumRound / NUM_16, 0, (colNumPad - colNumRound) / NUM_16));
 
         if constexpr (!doTriUMask) {
             SetFlag<HardEvent::MTE3_V>(pingPong);
@@ -490,7 +505,7 @@ public:
             }
 
             pingPong ^= 1;
-            pingPongOffset = pingPong * MAX_UB_S_ELEM_NUM;
+            pingPongOffset = pingPong ? MAX_UB_S_ELEM_NUM : 0;
 
             if (rowIdx >= PRE_LAUNCH) {
                 uint32_t nowRowIdx = rowIdx - PRE_LAUNCH;
@@ -529,7 +544,7 @@ public:
         uint32_t tokenNumPerHeadThisSubBlock = Min(qSBlockSize, coreRowActual);
         uint32_t maskOffsetThisSubBlock = (qNBlockSize == 1) ? coreRowOffset : 0;
 
-        // calc mask shift in gm
+        // calc mask shift in GM
         uint32_t gmOffsetMaskRow;
         uint32_t gmOffsetMaskCol;
         uint32_t maskCol;
@@ -597,7 +612,7 @@ public:
             }
 
             pingPong ^= 1;
-            pingPongOffset = pingPong * MAX_UB_S_ELEM_NUM;
+            pingPongOffset = pingPong ? MAX_UB_S_ELEM_NUM : 0;
 
             if (rowIdx >= PRE_LAUNCH) {
                 uint32_t nowRowIdx = rowIdx - PRE_LAUNCH;
@@ -648,6 +663,8 @@ public:
 
 private:
     float scaleVal;
+    uint32_t taskEvent;
+    uint32_t taskOffset;
 
     uint32_t pingPong = 0;
     uint32_t pingPongOffset = 0;

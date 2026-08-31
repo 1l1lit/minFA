@@ -18,14 +18,12 @@ constexpr uint32_t N_SPLIT_HELPER = 2;
 constexpr uint32_t MAX_KV_STACK_LEN = 512; // KV 分块的大小上限
 constexpr uint32_t Q_TILE_CEIL = 128;      // Q 分块的大小上限
 constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = Q_TILE_CEIL * MAX_KV_STACK_LEN;
-constexpr uint32_t L1_MAX_N_NUM = 128;
 constexpr uint32_t DOUBLE_BUFFER = 2;
 constexpr uint32_t SYNC_MODE = 0x2;
 constexpr uint32_t COMP_TRIU_MASK_DIM_LEN = 2048;
-constexpr uint32_t BLOCK_SIZE = 16;
+constexpr uint32_t NUM_16 = 16;
 constexpr uint32_t NUM_32 = 32;
 constexpr uint32_t NUM_128 = 128;
-constexpr uint32_t NUM_256 = 256;
 
 constexpr uint64_t MASK_ONE = 1ull;
 constexpr uint64_t MASK_NUL = 0ull;
@@ -59,17 +57,17 @@ struct FAIKernelParams {
     GM_ADDR tiling;
 };
 
-// 获取 Q 的 N（注意力头）维分块大小
+// 获取 Q 的 N 维分块大小
 CATLASS_DEVICE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
 {
-    uint32_t qNBlockTile = (qSeqlen != 0) ? RoundDown(Q_TILE_CEIL / qSeqlen, N_SPLIT_HELPER) : Q_TILE_CEIL;
+    uint32_t qNBlockTile = RoundDown(Q_TILE_CEIL / qSeqlen, N_SPLIT_HELPER);
     qNBlockTile = Min(qNBlockTile, groupSize); // Block 不能跨 group，因此分块大小不能超过 groupSize
     qNBlockTile = Max(qNBlockTile, 1u);        // 分块大小至少为 1
     return qNBlockTile;
 }
 
-// 获取 Q 的 S（序列长度）维分块大小
-CATLASS_DEVICE uint32_t GetQSBlockTile(uint32_t kvSeqlen) { return Q_TILE_CEIL; }
+// 获取 Q 的 S 维分块大小
+CATLASS_DEVICE uint32_t GetQSBlockTile() { return Q_TILE_CEIL; }
 
 // 设置向量掩码
 CATLASS_DEVICE void SetVecMaskLen(uint32_t len)

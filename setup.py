@@ -87,7 +87,7 @@ class BishengBuildExt(build_ext):
             "-shared",
             "-fPIC",
             "-std=c++17",
-            *(["-g3"] if DEBUG_BUILD else []),
+            "-g",
             abi_flag,
             *[f"-I{p}" for p in asc_include_paths],
             f"-I{python_include}",

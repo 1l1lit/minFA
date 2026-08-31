@@ -106,7 +106,6 @@ public:
         // V: GM -> L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
             EVENT_ID4); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
-        uint32_t gBOffset = 0;
         if constexpr (PAGED_CACHE_FLAG_) {
             blockStartOffset = 0;
             uint32_t blockStart = 0;
@@ -127,7 +126,7 @@ public:
                 uint32_t nowNIdx = nIdx * maxVStackLen / blockSize + curBlockIdx;
                 uint32_t nowLen = (curBlockIdx == curBlockTotalNum - 1) ? (blockEnd - blockStartOffset)
                                                                         : (blockSize - blockStartOffset);
-                gBOffset = (gBlockTable.GetValue(nowNIdx) * blockSize + blockStartOffset) * strideV;
+                uint32_t gBOffset = (gBlockTable.GetValue(nowNIdx) * blockSize + blockStartOffset) * strideV;
                 auto layoutBTile = layoutB.GetTileLayout(MakeCoord(nowLen, embed));
                 uint32_t curBlockSize = (curBlockIdx > 0) ? ((curBlockIdx - 1) * blockSize + blockStart) : 0;
                 MatrixCoord l1BTileCoord{curBlockSize, 0};
@@ -141,7 +140,7 @@ public:
                 }
             }
         } else {
-            gBOffset = nIdx * maxVStackLen * strideV;
+            uint32_t gBOffset = nIdx * maxVStackLen * strideV;
             auto layoutBTile = layoutB.GetTileLayout(MakeCoord(stackSeqTile, embed));
             copyGmToL1B(l1BTensor, gB[gBOffset], layoutBInL1, layoutBTile);
         }
@@ -213,7 +212,7 @@ public:
                         AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
 
                         // P @ V = OTmp
-                        uint32_t mL0Align = RoundUp(mL1Actual, BLOCK_SIZE);
+                        uint32_t mL0Align = RoundUp(mL1Actual, NUM_16);
                         tileMmad(
                             l0CTensor[l0CPingPong], l0ATensor[l0ABPingPong], l0BTensor[l0ABPingPong], mL0Align,
                             nL1Actual, kL0Actual, (kL1Idx == 0) && (kL0Idx == 0));

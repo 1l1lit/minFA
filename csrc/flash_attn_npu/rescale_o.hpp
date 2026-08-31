@@ -51,7 +51,7 @@ public:
         constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + UB_VEC_SIZE;
         constexpr uint32_t DM_OFFSET = 10 * UB_BLK_SIZE + 2 * UB_VEC_SIZE;
 
-        constexpr uint32_t TV_OFFSET = 11 * UB_BLK_SIZE;
+        constexpr uint32_t TV_OFFSET = 11 * UB_BLK_SIZE + 8 * UB_VEC_SIZE;
 
         lo = resource.ubBuf.template GetBufferByByte<float>(LO_OFFSET);
         go16 = resource.ubBuf.template GetBufferByByte<ElementOutput>(GO_OFFSET);
@@ -61,6 +61,12 @@ public:
         lse = resource.ubBuf.template GetBufferByByte<float>(GL_OFFSET);
         dm = resource.ubBuf.template GetBufferByByte<float>(DM_OFFSET);
         tv = resource.ubBuf.template GetBufferByByte<float>(TV_OFFSET);
+    }
+
+    CATLASS_DEVICE void set_curTaskMod(uint32_t curTaskMod)
+    {
+        taskEvent = curTaskMod + 2;
+        taskOffset = curTaskMod * ((4 * UB_VEC_SIZE) / sizeof(float));
     }
 
     CATLASS_DEVICE void CopyOToGm(
@@ -112,7 +118,7 @@ public:
         uint32_t qSBlockSize = layoutOutput.shape(0);
         uint32_t oHiddenSize = layoutOutput.shape(1);
         uint32_t qHeads = layoutLse.shape(1);
-        uint32_t dmUbOffsetCurStackTile = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowOffset;
+        uint32_t dmOffsetCurCycle = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowOffset;
 
         if (!isFirstStackTile) {
             WaitFlag<HardEvent::V_MTE2>(EVENT_ID3);
@@ -122,7 +128,7 @@ public:
 
         WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID6);
         if (!isFirstStackTile) {
-            Brcb(tv, dm[dmUbOffsetCurStackTile], curRowNumRound / DATABLOCK_PER_REPEAT, BrcbRepeatParams());
+            Brcb(tv, dm[taskOffset][dmOffsetCurCycle], curRowNumRound / DATABLOCK_PER_REPEAT, BrcbRepeatParams());
             PipeBarrier<PIPE_V>();
 
             if (needRowLoop) {
@@ -166,7 +172,7 @@ public:
 
         if (isLastStackTile) {
             // gl_block = expand_to_block(gl)
-            Brcb(tv, gl[rowOffset], curRowNumRound / DATABLOCK_PER_REPEAT, BrcbRepeatParams());
+            Brcb(tv, gl[taskOffset][rowOffset], curRowNumRound / DATABLOCK_PER_REPEAT, BrcbRepeatParams());
             PipeBarrier<PIPE_V>();
 
             // go = go / gl_block
@@ -203,31 +209,26 @@ public:
 
             // move lse to GM
             if (isLastRowLoop) {
-                Ln<float, false>(lse, gl, MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT), UnaryRepeatParams());
+                Ln<float, false>(
+                    lse[taskOffset], gl[taskOffset], MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT),
+                    UnaryRepeatParams());
                 PipeBarrier<PIPE_V>();
-
-                Add<float, false>(lse, lse, gm, MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT), BinaryRepeatParams());
-                PipeBarrier<PIPE_V>();
-
-                // lse_block = expand_to_block(lse)
-                Brcb(tv, lse, CeilDiv(totalRowNum, DATABLOCK_PER_REPEAT), BrcbRepeatParams());
-                PipeBarrier<PIPE_V>();
+                Add<float, false>(
+                    lse[taskOffset], lse[taskOffset], gm[taskOffset], MASK_NUL, CeilDiv(totalRowNum, FLT_PER_REPEAT),
+                    BinaryRepeatParams());
                 SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
                 WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
 
                 if (qNThisSubBlock == 0) {
-                    // single head: its tokens are contiguous in BNS/NT -> plain lse32 burst.
-                    DataCopyPad(gLse, lse, DataCopyExtParams(1, totalRowNum * sizeof(float), 0, 0, 0));
+                    DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, totalRowNum * sizeof(float), 0, 0, 0));
                 } else {
-                    // multi-head: per-token gather (srcStride) + scatter (dstStride).
-                    for (uint32_t qSIdx = 0; qSIdx < qSBlockSize; qSIdx++) {
-                        DataCopyPad(
-                            gLse[qSIdx], tv[qSIdx * DATABLOCK_PER_REPEAT],
-                            DataCopyExtParams(
-                                qNThisSubBlock, sizeof(float), qSBlockSize - 1,
-                                (layoutLse.stride(0) - 1) * sizeof(float), 0));
-                    }
+                    DataCopyPad(
+                        gLse, lse[taskOffset],
+                        DataCopyExtParams(
+                            qNThisSubBlock, qSBlockSize * sizeof(float), 0,
+                            (layoutLse.stride(0) - qSBlockSize) * sizeof(float), 0));
                 }
+                SetFlag<HardEvent::MTE3_V>(taskEvent); // 通知当前 task 的 RS 完成
             }
         } else if (needRowLoop) {
             SetFlag<HardEvent::V_MTE3>(EVENT_ID5);
@@ -308,6 +309,9 @@ public:
     }
 
 private:
+    uint32_t taskEvent;
+    uint32_t taskOffset;
+
     LocalTensor<float> lo;
     LocalTensor<ElementOutput> go16;
     LocalTensor<float> go32;

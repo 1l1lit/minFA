@@ -38,11 +38,13 @@ def run_varlen_fwd():
     变长序列 Flash Attention 前向推理
     输入形状: (total_tokens, nheads, headdim)
     """
-    max_seqlen = 512
     nheads, nheadskv, headdim = 24, 4, 128
     
     # 模拟变长序列长度
     seqlens = [32, 32, 32, 150, 512]
+    # seqlens = [150, 150, 150, 150, 150]
+
+    max_seqlen = max(seqlens)
     total_tokens = sum(seqlens)
     
     # 构建 cu_seqlens
