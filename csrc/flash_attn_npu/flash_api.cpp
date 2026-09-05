@@ -155,7 +155,8 @@ std::vector<at::Tensor> mha_fwd_kvcache(
 
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        at::Tensor mask_cpu_tensor = at::empty({2048, 2048}, at::device(c10::kCPU).dtype(at::kByte));
+        uint32_t mask_len = KernelCommon::MASK_LEN;
+        at::Tensor mask_cpu_tensor = at::empty({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
     }
@@ -253,7 +254,8 @@ std::vector<at::Tensor> mha_fwd(
     uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        at::Tensor mask_cpu_tensor = at::empty({2048, 2048}, at::device(c10::kCPU).dtype(at::kByte));
+        uint32_t mask_len = KernelCommon::MASK_LEN;
+        at::Tensor mask_cpu_tensor = at::empty({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
         maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
@@ -441,7 +443,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     // attention mask
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        at::Tensor mask_cpu_tensor = at::empty({2048, 2048}, at::device(c10::kCPU).dtype(at::kByte));
+        uint32_t mask_len = KernelCommon::MASK_LEN;
+        at::Tensor mask_cpu_tensor = at::empty({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
     }

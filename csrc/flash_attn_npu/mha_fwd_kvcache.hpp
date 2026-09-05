@@ -100,10 +100,10 @@ public:
         AscendC::GlobalTensor<ElementLse> gLse;
         gLse.SetGlobalBuffer((__gm__ ElementLse*)params.lse);
 
-        AscendC::GlobalTensor<ElementS> gSTmp;
-        gSTmp.SetGlobalBuffer((__gm__ ElementS*)(params.workspace));
-        AscendC::GlobalTensor<ElementP> gPTmp;
-        gPTmp.SetGlobalBuffer((__gm__ ElementP*)(params.workspace + mm1OutSize));
+        AscendC::GlobalTensor<ElementS> gS;
+        gS.SetGlobalBuffer((__gm__ ElementS*)(params.workspace));
+        AscendC::GlobalTensor<ElementP> gP;
+        gP.SetGlobalBuffer((__gm__ ElementP*)(params.workspace + mm1OutSize));
         AscendC::GlobalTensor<ElementOTmp> gOTmp;
         gOTmp.SetGlobalBuffer((__gm__ ElementOTmp*)(params.workspace + mm1OutSize + smOnlineOutSize));
         AscendC::GlobalTensor<ElementOTmp> gOUpdate;
@@ -314,19 +314,19 @@ public:
                         stackSeqTile = MAX_KV_STACK_LEN;
                     }
                     uint32_t curStackTileMod = loopNum % DOUBLE_BUFFER; // 环形复用 GM 空间
-                    uint64_t gmOffsetSTmp = (coreIdx * DOUBLE_BUFFER + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
+                    uint64_t gmOffsetS = (coreIdx * DOUBLE_BUFFER + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
-                    LayoutS layoutSTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
+                    LayoutS layoutS(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
 
                     if ASCEND_IS_AIC {
                         if constexpr (PAGED_CACHE_FLAG_) {
                             blockMmadQK(
-                                gK[gmOffsetK], gSTmp[gmOffsetSTmp], gBlockTable[gmOffsetBlock], layoutKTmp, layoutSTmp,
+                                gK[gmOffsetK], gS[gmOffsetS], gBlockTable[gmOffsetBlock], layoutKTmp, layoutS,
                                 actualBlockShapeQK, kvSIdx, pagedBlockSize, strideK);
                         } else {
                             blockMmadQK(
-                                gK[gmOffsetK], gSTmp[gmOffsetSTmp], gBlockTable, layoutKTmp, layoutSTmp,
-                                actualBlockShapeQK, kvSIdx, pagedBlockSize, strideK);
+                                gK[gmOffsetK], gS[gmOffsetS], gBlockTable, layoutKTmp, layoutS, actualBlockShapeQK,
+                                kvSIdx, pagedBlockSize, strideK);
                         }
                         if (loopNum == 0) {
                             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
@@ -334,9 +334,9 @@ public:
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
-                        LayoutP layoutPTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
-                        LayoutMask layoutMask(COMP_TRIU_MASK_DIM_LEN, COMP_TRIU_MASK_DIM_LEN);
-                        uint64_t gmOffsetPTmp = gmOffsetSTmp;
+                        LayoutP layoutP(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
+                        LayoutMask layoutMask(MASK_LEN, MASK_LEN);
+                        uint64_t gmOffsetP = gmOffsetS;
                         uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN;
                         uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;
                         epilogueOnlineSoftmax.set_curTaskMod(curTaskMod);
@@ -346,7 +346,7 @@ public:
                             if (triUp < kvSEndIdx - 1) {
                                 // KV 分块内需要掩码
                                 epilogueOnlineSoftmax(
-                                    gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], gMask, layoutPTmp, layoutSTmp, layoutMask,
+                                    gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask,
                                     actualBlockShapeQK, (kvSIdx == 0), qSBlockSize, qNBlockSize, curStackTileMod,
                                     qkReady, triUp, triDown, kvSStartIdx, kvSEndIdx);
                             } else {
@@ -354,15 +354,14 @@ public:
                                 uint32_t noMaskStackSeqNum = (triUp + 1) / MAX_KV_STACK_LEN;
                                 Arch::CrossCoreWaitFlag(qkReady);
                                 epilogueOnlineSoftmax(
-                                    gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], layoutPTmp, layoutSTmp,
-                                    actualBlockShapeQK, (kvSIdx == 0), (kvSIdx == noMaskStackSeqNum - 1),
-                                    curStackTileMod);
+                                    gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0),
+                                    (kvSIdx == noMaskStackSeqNum - 1), qSBlockSize, qNBlockSize, curStackTileMod);
                             }
                         } else {
                             Arch::CrossCoreWaitFlag(qkReady);
                             epilogueOnlineSoftmax(
-                                gPTmp[gmOffsetPTmp], gSTmp[gmOffsetSTmp], layoutPTmp, layoutSTmp, actualBlockShapeQK,
-                                (kvSIdx == 0), 0, curStackTileMod);
+                                gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0), 0,
+                                qSBlockSize, qNBlockSize, curStackTileMod);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }
@@ -387,18 +386,17 @@ public:
                     LayoutOTmp layoutOTmp(rowNum, embed, embedRound);
 
                     if ASCEND_IS_AIC {
-                        LayoutP layoutPTmp(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
-                        uint64_t gmOffsetPTmp = gmOffsetOTmp;
+                        LayoutP layoutP(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
+                        uint64_t gmOffsetP = gmOffsetOTmp;
                         if constexpr (PAGED_CACHE_FLAG_) {
                             blockMmadPV(
-                                gPTmp[gmOffsetPTmp], gV[gmOffsetV], gOTmp[gmOffsetOTmp], gBlockTable[gmOffsetBlock],
-                                layoutPTmp, layoutVTmp, layoutOTmp, actualBlockShapePV, nowKvSIdx, pagedBlockSize,
-                                strideV, softmaxReady);
-                        } else {
-                            blockMmadPV(
-                                gPTmp[gmOffsetPTmp], gV[gmOffsetV], gOTmp[gmOffsetOTmp], gBlockTable, layoutPTmp,
+                                gP[gmOffsetP], gV[gmOffsetV], gOTmp[gmOffsetOTmp], gBlockTable[gmOffsetBlock], layoutP,
                                 layoutVTmp, layoutOTmp, actualBlockShapePV, nowKvSIdx, pagedBlockSize, strideV,
                                 softmaxReady);
+                        } else {
+                            blockMmadPV(
+                                gP[gmOffsetP], gV[gmOffsetV], gOTmp[gmOffsetOTmp], gBlockTable, layoutP, layoutVTmp,
+                                layoutOTmp, actualBlockShapePV, nowKvSIdx, pagedBlockSize, strideV, softmaxReady);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(pvReady);
                     } else { // ASCEND_IS_AIV
