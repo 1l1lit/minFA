@@ -105,7 +105,7 @@ public:
 
         // V: GM -> L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
-            EVENT_ID4); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
+            EVENT_ID2); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
         if constexpr (PAGED_CACHE_FLAG_) {
             blockStartOffset = 0;
             uint32_t blockStart = 0;
@@ -244,7 +244,7 @@ public:
         }
 
         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(
-            EVENT_ID4); // 通知 L1 -> L0 搬运完成，可以进行下一轮 GM -> L1 搬运
+            EVENT_ID2); // 通知 L1 -> L0 搬运完成，可以进行下一轮 GM -> L1 搬运
     }
 
 protected:

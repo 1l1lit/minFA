@@ -59,8 +59,7 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     TORCH_CHECK(vcache.stride(-1) == 1, "Input tensor vcache must have contiguous last dimension");
 
     at::Tensor tiling_cpu_tensor = at::empty({1024}, at::device(c10::kCPU).dtype(at::kByte));
-
-    FAInferTilingData* tiling_cpu_ptr = reinterpret_cast<FAInferTilingData*>(tiling_cpu_tensor.data_ptr<uint8_t>());
+    auto tiling_cpu_ptr = reinterpret_cast<FAInferTilingData*>(tiling_cpu_tensor.data_ptr<uint8_t>());
     uint32_t coreNum = platform_ascendc::PlatformAscendCManager::GetInstance()->GetCoreNumAic();
     at::Tensor seqlens_k, block_table, out;
     at::Tensor k, v, rotary_cos, rotary_sin, cache_batch_idx, alibi_slopes;
@@ -122,8 +121,6 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     TORCH_CHECK(head_size <= 256, "FlashAttention only supports head dimension at most 256");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
-    at::Tensor seqlenk_cpu_tensor = seqlens_k.to(at::Device(at::kCPU));
-    int32_t* seqlens_k_cpu = static_cast<int32_t*>(seqlenk_cpu_tensor.data_ptr());
     tiling_cpu_ptr->set_batch(static_cast<uint32_t>(batch_size));
     tiling_cpu_ptr->set_numHeads(static_cast<uint32_t>(num_heads));
     tiling_cpu_ptr->set_kvHeads(static_cast<uint32_t>(num_heads_k));
@@ -143,40 +140,39 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
-    at::Tensor softmax_lse =
-        at::empty({batch_size, num_heads, seqlen_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
-    softmax_lse.fill_(std::numeric_limits<float>::infinity());
-
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
     tiling_cpu_ptr->set_workspaceSize(workspaceSize);
 
+    at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
+    at::Tensor softmax_lse =
+        at::empty({batch_size, num_heads, seqlen_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
+
+    uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
         uint32_t mask_len = KernelCommon::MASK_LEN;
-        at::Tensor mask_cpu_tensor = at::empty({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
-        mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
+        at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
+        mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
+        maskDevice = static_cast<uint8_t*>(mask_npu_tensor.data_ptr());
     }
-    at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
+
     uint64_t fftsAddr = 0;
     uint32_t fftsLen = 0;
     rtError_t error = rtGetC2cCtrlAddr(&fftsAddr, &fftsLen);
+
     auto qDevice = static_cast<uint8_t*>(q.data_ptr());
     auto kDevice = static_cast<uint8_t*>(kcache.data_ptr());
     auto vDevice = static_cast<uint8_t*>(vcache.data_ptr());
+    uint8_t* qSeqDevice = nullptr;
     uint8_t* blockTableDevice = nullptr;
-    uint8_t* maskDevice = nullptr;
     if (paged_KV) {
         blockTableDevice = static_cast<uint8_t*>(block_table.data_ptr());
     }
-    if (is_causal) {
-        maskDevice = static_cast<uint8_t*>(mask_npu_tensor.data_ptr());
-    }
     auto oDevice = static_cast<uint8_t*>(out.data_ptr());
-    auto qSeqDevice = static_cast<uint8_t*>(seqlens_k.data_ptr());
     auto kvSeqDevice = static_cast<uint8_t*>(seqlens_k.data_ptr());
     auto workspaceDevice = static_cast<uint8_t*>(workspace_tensor.data_ptr());
     auto tilingDevice = static_cast<uint8_t*>(tiling_npu_tensor.data_ptr());
@@ -255,8 +251,8 @@ std::vector<at::Tensor> mha_fwd(
     at::Tensor mask_npu_tensor;
     if (is_causal) {
         uint32_t mask_len = KernelCommon::MASK_LEN;
-        at::Tensor mask_cpu_tensor = at::empty({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
-        mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
+        at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
+        mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
         maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
     }
@@ -264,7 +260,6 @@ std::vector<at::Tensor> mha_fwd(
     // init softmax lse
     at::Tensor softmax_lse =
         at::empty({batch_size, num_heads, seqlen_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
-    softmax_lse.fill_(std::numeric_limits<float>::infinity());
     auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmax_lse.data_ptr()));
 
     // ffts related
@@ -285,7 +280,7 @@ std::vector<at::Tensor> mha_fwd(
 
     // tiling
     at::Tensor tiling_cpu_tensor = at::empty({1024}, at::device(c10::kCPU).dtype(at::kByte));
-    FAInferTilingData* tiling_cpu_ptr = reinterpret_cast<FAInferTilingData*>(tiling_cpu_tensor.data_ptr<uint8_t>());
+    auto tiling_cpu_ptr = reinterpret_cast<FAInferTilingData*>(tiling_cpu_tensor.data_ptr<uint8_t>());
     tiling_cpu_ptr->set_batch(static_cast<uint32_t>(batch_size));
     tiling_cpu_ptr->set_numHeads(static_cast<uint32_t>(num_heads));
     tiling_cpu_ptr->set_kvHeads(static_cast<uint32_t>(num_heads_k));
@@ -305,14 +300,13 @@ std::vector<at::Tensor> mha_fwd(
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
     auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
     auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
-    at::Tensor seqlenq_npu_tensor = at::full({batch_size}, seqlen_q).to(at::Device(at::kPrivateUse1)).to(at::kInt);
-    at::Tensor seqlenk_npu_tensor = at::full({batch_size}, seqlen_k).to(at::Device(at::kPrivateUse1)).to(at::kInt);
+    at::Tensor seqlenk_npu_tensor = at::full({batch_size}, seqlen_k, at::device(at::kPrivateUse1).dtype(at::kInt));
     at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
-    auto qSeqDevice = static_cast<uint8_t*>(const_cast<void*>(seqlenq_npu_tensor.data_ptr()));
     auto kvSeqDevice = static_cast<uint8_t*>(const_cast<void*>(seqlenk_npu_tensor.data_ptr()));
     auto workspaceDevice = static_cast<uint8_t*>(const_cast<void*>(workspace_tensor.data_ptr()));
     auto tilingDevice = static_cast<uint8_t*>(const_cast<void*>(tiling_npu_tensor.data_ptr()));
     auto oDevice = static_cast<uint8_t*>(const_cast<void*>(out.data_ptr()));
+    uint8_t* qSeqDevice = nullptr;
     uint8_t* blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
 
     // run kernel
@@ -353,7 +347,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
     at::Tensor tiling_cpu_tensor = at::empty({1024}, at::device(c10::kCPU).dtype(at::kByte));
-    FAInferTilingData* tiling_cpu_ptr = reinterpret_cast<FAInferTilingData*>(tiling_cpu_tensor.data_ptr<uint8_t>());
+    auto tiling_cpu_ptr = reinterpret_cast<FAInferTilingData*>(tiling_cpu_tensor.data_ptr<uint8_t>());
     uint32_t coreNum = platform_ascendc::PlatformAscendCManager::GetInstance()->GetCoreNumAic();
 
     bool is_bf16 = q.dtype() == torch::kBFloat16;
@@ -383,7 +377,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
     if (leftpad_k_.has_value()) {
         leftpad_k = leftpad_k_.value();
     }
-
     if (alibi_slopes_.has_value()) {
         alibi_slopes = alibi_slopes_.value();
     }
@@ -429,42 +422,37 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
-    at::Tensor softmax_lse = at::empty({num_heads, total_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
-    softmax_lse.fill_(std::numeric_limits<float>::infinity());
-
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
     tiling_cpu_ptr->set_workspaceSize(workspaceSize);
 
-    at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1)); // Tiling to Device
+    at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
+    at::Tensor softmax_lse = at::empty({num_heads, total_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
 
     // attention mask
+    uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
         uint32_t mask_len = KernelCommon::MASK_LEN;
-        at::Tensor mask_cpu_tensor = at::empty({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
-        mask_cpu_tensor = at::triu(at::ones_like(mask_cpu_tensor), 1);
+        at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
+        mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
+        maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
     }
 
     uint64_t fftsAddr = 0;
     uint32_t fftsLen = 0;
     rtError_t error = rtGetC2cCtrlAddr(&fftsAddr, &fftsLen);
+
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
     auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
     auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
-
     uint8_t* blockTableDevice = nullptr;
-    uint8_t* maskDevice = nullptr;
     if (paged_KV) {
         blockTableDevice = static_cast<uint8_t*>(const_cast<void*>(block_table.data_ptr()));
     }
-    if (is_causal) {
-        maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
-    }
-
     auto oDevice = static_cast<uint8_t*>(const_cast<void*>(out.data_ptr()));
     auto qSeqDevice = static_cast<uint8_t*>(const_cast<void*>(cu_seqlens_q.data_ptr()));
     auto kvSeqDevice = static_cast<uint8_t*>(const_cast<void*>(cu_seqlens_k.data_ptr()));

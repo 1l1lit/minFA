@@ -18,7 +18,7 @@ constexpr uint32_t Q_TILE_CEIL = 128;      // Q 分块的大小上限
 constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = Q_TILE_CEIL * MAX_KV_STACK_LEN;
 constexpr uint32_t MASK_LEN = 2048;
 constexpr uint32_t MAX_UB_ELEM_NUM = 8192;
-constexpr uint32_t MAX_ROW_NUM_SUB_CORE = 256;
+constexpr uint32_t MAX_ROW_NUM_SUB_CORE = 64;
 constexpr uint32_t PRE_LAUNCH = 1;
 constexpr uint32_t DOUBLE_BUFFER = 2;
 constexpr uint32_t SYNC_MODE = 0x2;
@@ -30,15 +30,14 @@ constexpr uint64_t MASK_ONE = 1ull;
 constexpr uint64_t MASK_NUL = 0ull;
 constexpr uint64_t MASK_ALL = ~0ull;
 
+constexpr uint32_t UB_RPT_SIZE = 256;   // 256 B
 constexpr uint32_t UB_VEC_SIZE = 1024;  // 1 KB
 constexpr uint32_t UB_BLK_SIZE = 16384; // 16 KB
 
-constexpr uint32_t DATABLOCK_PER_REPEAT = 8;
 constexpr uint32_t FLT_PER_DATABLOCK = 8;
 constexpr uint32_t HALF_PER_DATABLOCK = 16;
 constexpr uint32_t FLT_PER_REPEAT = 64;
 constexpr uint32_t HALF_PER_REPEAT = 128;
-constexpr uint32_t REPEAT_SIZE = 256;
 
 enum class MaskType : uint32_t { NO_MASK = 0, MASK_CAUSAL = 1 };
 

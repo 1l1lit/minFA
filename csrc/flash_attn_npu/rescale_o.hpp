@@ -45,10 +45,10 @@ public:
         constexpr uint32_t GO_OFFSET = 8 * UB_BLK_SIZE;
 
         constexpr uint32_t GM_OFFSET = 10 * UB_BLK_SIZE;
-        constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + UB_VEC_SIZE;
-        constexpr uint32_t DM_OFFSET = 10 * UB_BLK_SIZE + 2 * UB_VEC_SIZE;
+        constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + UB_RPT_SIZE;
 
-        constexpr uint32_t TV_OFFSET = 11 * UB_BLK_SIZE + 8 * UB_VEC_SIZE;
+        constexpr uint32_t DM_OFFSET = 11 * UB_BLK_SIZE + 2 * UB_RPT_SIZE;
+        constexpr uint32_t TV_OFFSET = 11 * UB_BLK_SIZE + 12 * UB_VEC_SIZE;
 
         lo = resource.ubBuf.template GetBufferByByte<float>(LO_OFFSET);
         go16 = resource.ubBuf.template GetBufferByByte<ElementOutput>(GO_OFFSET);
@@ -63,7 +63,7 @@ public:
     CATLASS_DEVICE void set_curTaskMod(uint32_t curTaskMod)
     {
         taskEvent = curTaskMod + 2;
-        taskOffset = curTaskMod * ((4 * UB_VEC_SIZE) / sizeof(float));
+        taskOffset = curTaskMod * (2 * UB_RPT_SIZE);
     }
 
     CATLASS_DEVICE void CopyOToGm(
@@ -106,25 +106,28 @@ public:
         uint32_t rowOffset, uint32_t proTokenIdx, uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum)
     {
         uint32_t rowNum = layoutInput.shape(0);
-        uint32_t rowNumRound = RoundUp(rowNum, DATABLOCK_PER_REPEAT);
+        uint32_t rowNumRound = RoundUp(rowNum, FLT_PER_DATABLOCK);
         uint32_t embed = layoutInput.shape(1);
         uint32_t embedRound = layoutInput.stride(0);
-        uint32_t qSeqlen = layoutOutput.shape(0);
         uint32_t strideO = layoutOutput.shape(1);
-        uint32_t qHeads = layoutLse.shape(1);
         uint32_t dmOffset = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowOffset;
 
-        if (!isFirstStackTile) {
-            WaitFlag<HardEvent::V_MTE2>(EVENT_ID3);
+        if (isFirstStackTile) {
+            // go = lo
+            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+            DataCopy(go32, gInput, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+        } else {
+            WaitFlag<HardEvent::V_MTE2>(EVENT_ID2);
             DataCopy(lo, gInput, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
             SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
-        }
 
-        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID6);
-        if (!isFirstStackTile) {
-            Brcb(tv, dm[taskOffset][dmOffset], rowNumRound / DATABLOCK_PER_REPEAT, BrcbRepeatParams());
+            // dm_block = expand_to_block(dm)
+            Brcb(tv, dm[dmOffset], rowNumRound / FLT_PER_DATABLOCK, BrcbRepeatParams());
             PipeBarrier<PIPE_V>();
 
+            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
             if (multipleRowLoop) {
                 DataCopy(go32, gUpdate, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
                 SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
@@ -135,55 +138,43 @@ public:
             for (uint32_t vmul_idx = 0; vmul_idx < embed / FLT_PER_REPEAT; vmul_idx++) {
                 Mul<float, false>(
                     go32[vmul_idx * FLT_PER_REPEAT], go32[vmul_idx * FLT_PER_REPEAT], tv, MASK_NUL, rowNum,
-                    BinaryRepeatParams(
-                        1, 1, 0, embedRound / DATABLOCK_PER_REPEAT, embedRound / DATABLOCK_PER_REPEAT, 1));
+                    BinaryRepeatParams(1, 1, 0, embedRound / FLT_PER_DATABLOCK, embedRound / FLT_PER_DATABLOCK, 1));
             }
-
             if (embed % FLT_PER_REPEAT > 0) {
                 SetVecMaskLen(embed % FLT_PER_REPEAT);
                 Mul<float, false>(
                     go32[RoundDown(embed, FLT_PER_REPEAT)], go32[RoundDown(embed, FLT_PER_REPEAT)], tv, MASK_NUL,
                     rowNum,
-                    BinaryRepeatParams(
-                        1, 1, 0, embedRound / DATABLOCK_PER_REPEAT, embedRound / DATABLOCK_PER_REPEAT, 1));
+                    BinaryRepeatParams(1, 1, 0, embedRound / FLT_PER_DATABLOCK, embedRound / FLT_PER_DATABLOCK, 1));
                 ResetMask();
             }
             PipeBarrier<PIPE_V>();
 
-            WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
             // go = lo + go
-            Add<float, false>(
-                go32, go32, lo, MASK_NUL, (rowNum * embedRound + FLT_PER_REPEAT - 1) / FLT_PER_REPEAT,
-                BinaryRepeatParams());
-            PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_MTE2>(EVENT_ID3);
-        } else {
-            // go = lo
-            DataCopy(go32, gInput, DataCopyParams(1, rowNum * embedRound / DATABLOCK_PER_REPEAT, 0, 0));
-            SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
             WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+            Add<float, false>(
+                go32, go32, lo, MASK_NUL, CeilDiv(rowNum * embedRound, FLT_PER_REPEAT), BinaryRepeatParams());
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE2>(EVENT_ID2);
         }
 
         if (isLastStackTile) {
             // gl_block = expand_to_block(gl)
-            Brcb(tv, gl[taskOffset][rowOffset], rowNumRound / DATABLOCK_PER_REPEAT, BrcbRepeatParams());
+            Brcb(tv, gl[taskOffset][rowOffset], rowNumRound / FLT_PER_DATABLOCK, BrcbRepeatParams());
             PipeBarrier<PIPE_V>();
 
             // go = go / gl_block
             for (uint32_t vdiv_idx = 0; vdiv_idx < embed / FLT_PER_REPEAT; vdiv_idx++) {
                 Div<float, false>(
                     go32[vdiv_idx * FLT_PER_REPEAT], go32[vdiv_idx * FLT_PER_REPEAT], tv, MASK_NUL, rowNum,
-                    BinaryRepeatParams(
-                        1, 1, 0, embedRound / DATABLOCK_PER_REPEAT, embedRound / DATABLOCK_PER_REPEAT, 1));
+                    BinaryRepeatParams(1, 1, 0, embedRound / FLT_PER_DATABLOCK, embedRound / FLT_PER_DATABLOCK, 1));
             }
-
             if (embed % FLT_PER_REPEAT > 0) {
                 SetVecMaskLen(embed % FLT_PER_REPEAT);
                 Div<float, false>(
                     go32[RoundDown(embed, FLT_PER_REPEAT)], go32[RoundDown(embed, FLT_PER_REPEAT)], tv, MASK_NUL,
                     rowNum,
-                    BinaryRepeatParams(
-                        1, 1, 0, embedRound / DATABLOCK_PER_REPEAT, embedRound / DATABLOCK_PER_REPEAT, 1));
+                    BinaryRepeatParams(1, 1, 0, embedRound / FLT_PER_DATABLOCK, embedRound / FLT_PER_DATABLOCK, 1));
                 ResetMask();
             }
             PipeBarrier<PIPE_V>();
@@ -217,9 +208,9 @@ public:
         } else if (multipleRowLoop) {
             SetFlag<HardEvent::V_MTE3>(EVENT_ID5);
             WaitFlag<HardEvent::V_MTE3>(EVENT_ID5);
-            DataCopy(gUpdate, go32, DataCopyParams(1, rowNum * embedRound / DATABLOCK_PER_REPEAT, 0, 0));
+            DataCopy(gUpdate, go32, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
         }
-        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID6);
+        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
     }
 
     CATLASS_DEVICE void operator()(
@@ -231,7 +222,7 @@ public:
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
-        uint32_t rowNumTile = RoundDown(MAX_UB_ELEM_NUM / embed, DATABLOCK_PER_REPEAT);
+        uint32_t rowNumTile = RoundDown(MAX_UB_ELEM_NUM / embed, FLT_PER_DATABLOCK);
 
         uint32_t coreIdx = GetSubBlockIdx();
         uint32_t inRowSplit = (qNBlockSize == 1) ? (qSBlockSize / 2) : (qSBlockSize * (qNBlockSize / 2));

@@ -114,35 +114,21 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID2);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID3);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID4);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID5);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID6);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID7);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID4);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID6);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
         } else {
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID4);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
         }
 
         if ASCEND_IS_AIC {
@@ -197,9 +183,9 @@ public:
             coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
         }
 
-        uint32_t taskIdx = coreIdx;
+        uint32_t loopNum = 0;
         bool launchNextTask = true;
-        for (uint32_t loopNum = 0; launchNextTask; SwapTask()) {
+        for (uint32_t taskIdx = coreIdx; launchNextTask; taskIdx += coreNum, SwapTask()) {
             for (launchNextTask = false; kvSIdx < kvSLoop + PRE_LAUNCH; kvSIdx++, loopNum++) {
                 // *** PRE LAUNCH ***
                 if (kvSIdx == kvSLoop) {
@@ -292,14 +278,13 @@ public:
                             layoutKTmp = LayoutK(strideK, MAX_KV_STACK_LEN); // (N * D, S)
                             layoutVTmp = LayoutV(MAX_KV_STACK_LEN, strideV); // (S, N * D)
                             if (loopNum == PRE_LAUNCH) {
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
-                                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
+                                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
+                                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
                             }
                             blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTmp, qSBlockSize, qNBlockSize, qHeads);
                         }
 
                         kvSIdx = 0;
-                        taskIdx += coreNum;
                         launchNextTask = true;
                     } else {
                         SwapTask();
@@ -313,7 +298,7 @@ public:
                     } else {
                         stackSeqTile = MAX_KV_STACK_LEN;
                     }
-                    uint32_t curStackTileMod = loopNum % DOUBLE_BUFFER; // 环形复用 GM 空间
+                    uint32_t curStackTileMod = loopNum % DOUBLE_BUFFER;
                     uint64_t gmOffsetS = (coreIdx * DOUBLE_BUFFER + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
                     LayoutS layoutS(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
@@ -329,8 +314,8 @@ public:
                                 kvSIdx, pagedBlockSize, strideK);
                         }
                         if (loopNum == 0) {
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
-                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
@@ -341,16 +326,13 @@ public:
                         uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;
                         epilogueOnlineSoftmax.set_curTaskMod(curTaskMod);
                         if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
-                            uint32_t triUp = noSkipKvS - qSBlockSize; // 第一个需要部分掩码的 KV 索引
-                            uint32_t triDown = noSkipKvS;             // 第一个完全被掩码的 KV 索引
-                            if (triUp < kvSEndIdx - 1) {
-                                // KV 分块内需要掩码
+                            uint32_t triUp = noSkipKvS - qSBlockSize;
+                            if (triUp < kvSEndIdx - 1) { // KV 分块内需要掩码
                                 epilogueOnlineSoftmax(
                                     gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask,
                                     actualBlockShapeQK, (kvSIdx == 0), qSBlockSize, qNBlockSize, curStackTileMod,
-                                    qkReady, triUp, triDown, kvSStartIdx, kvSEndIdx);
-                            } else {
-                                // KV 分块内无需掩码
+                                    qkReady, triUp, noSkipKvS, kvSStartIdx, kvSEndIdx);
+                            } else { // KV 分块内无需掩码
                                 uint32_t noMaskStackSeqNum = (triUp + 1) / MAX_KV_STACK_LEN;
                                 Arch::CrossCoreWaitFlag(qkReady);
                                 epilogueOnlineSoftmax(
@@ -421,35 +403,21 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID2);
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID3);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID4);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID5);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID6);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID7);
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID4);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID5);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID6);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
         } else {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID4);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
         }
         AscendC::PipeBarrier<PIPE_ALL>();
     }
