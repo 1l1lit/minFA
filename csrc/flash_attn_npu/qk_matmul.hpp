@@ -68,9 +68,8 @@ public:
 
     static_assert(std::is_same_v<LayoutC, layout::RowMajor>, "LayoutC only support RowMajor yet!");
 
-    CATLASS_DEVICE BlockMmad() = default;
-
-    CATLASS_DEVICE ~BlockMmad() = default;
+    CATLASS_DEVICE BlockMmad(uint32_t& l1BPingPong_, uint32_t& l0ABPingPong_, uint32_t& l0CPingPong_)
+        : l1BPingPong(l1BPingPong_), l0ABPingPong(l0ABPingPong_), l0CPingPong(l0CPingPong_) {};
 
     CATLASS_DEVICE void init(
         Arch::Resource<ArchTag>& resource, uint32_t nDyn, uint32_t kDyn, uint32_t KStackLen = MAX_KV_STACK_LEN,
@@ -94,7 +93,7 @@ public:
 
     CATLASS_DEVICE void loadQGM(
         const AscendC::GlobalTensor<ElementA>& gA, const LayoutA& layoutA, uint32_t qSBlockSize, uint32_t qNBlockSize,
-        uint32_t qHeads)
+        uint32_t strideQ)
     {
         // Q: (S * N, D)
         uint32_t rowNum = layoutA.shape(0);
@@ -111,7 +110,7 @@ public:
             layoutAInL1,     // layoutDst
             layoutASingleNd, // layoutSrc
             qSBlockSize,     // ndNum
-            qHeads * embed,  // srcNdMatrixStride
+            strideQ,         // srcNdMatrixStride
             qSBlockSize,     // dstNzNStride
             NUM_16,          // dstNzMatrixStride
             rowNumRound);    // dstNzC0Stride
@@ -185,13 +184,13 @@ public:
 
                 for (uint32_t kL0Idx = 0; kL0Idx < kL0Loop; kL0Idx++) {
                     uint32_t kL0Actual = (kL0Idx == kL0Loop - 1) ? (embed - kL0Idx * L0TileShape::K) : L0TileShape::K;
+                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(
+                        l0ABPingPong); // 等待上一轮 M 计算完成，再进行 L1 -> L0 搬运
 
                     // Q: L1 -> L0
                     LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mL0Actual, kL0Actual);
                     MatrixCoord l1ATileCoord{mL0Idx * L0TileShape::M, kL0Idx * L0TileShape::K};
                     auto l1ATile = l1ATensor[layoutAInL1.GetOffset(l1ATileCoord)];
-                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(
-                        l0ABPingPong); // 等待上一轮 M 计算完成，再进行 L1 -> L0 搬运
                     copyL1ToL0A(
                         l0ATensor[l0ABPingPong], // dstTensor
                         l1ATile,                 // srcTensor
@@ -206,8 +205,6 @@ public:
                         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(
                             l1BPingPong); // 等待 GM -> L1 搬运完成，再进行 L1 -> L0 搬运
                     }
-                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(
-                        l0ABPingPong + 2); // 等待上一轮 M 计算完成，再进行 L1 -> L0 搬运
                     copyL1ToL0B(
                         l0BTensor[l0ABPingPong], // dstTensor
                         l1BTile,                 // srcTensor
@@ -232,10 +229,8 @@ public:
                         nActual,                 // n
                         kL0Actual,               // k
                         kL0Idx == 0);            // initC (bool)
-
-                    // 通知 M 计算完成，可以进行下一轮 L1 -> L0 搬运
-                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong);
-                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong + 2);
+                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(
+                        l0ABPingPong); // 通知 M 计算完成，可以进行下一轮 L1 -> L0 搬运
 
                     l0ABPingPong ^= 1;
                 }
@@ -277,9 +272,9 @@ private:
     CopyL1ToL0B copyL1ToL0B;
     CopyL0CToGm copyL0CToGm;
 
-    uint32_t l1BPingPong = 0;
-    uint32_t l0ABPingPong = 0;
-    uint32_t l0CPingPong = 0;
+    uint32_t& l1BPingPong;
+    uint32_t& l0ABPingPong;
+    uint32_t& l0CPingPong;
 
     uint32_t l1NDynamic = 0;
     uint32_t blockStartOffset = 0;

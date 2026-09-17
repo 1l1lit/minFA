@@ -136,7 +136,7 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
     uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
     uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
@@ -153,7 +153,7 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        uint32_t mask_len = KernelCommon::MASK_LEN;
+        uint32_t mask_len = KernelCommon::MAX_KV_STACK_LEN;
         at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
@@ -250,7 +250,7 @@ std::vector<at::Tensor> mha_fwd(
     uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        uint32_t mask_len = KernelCommon::MASK_LEN;
+        uint32_t mask_len = KernelCommon::MAX_KV_STACK_LEN;
         at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
@@ -274,7 +274,7 @@ std::vector<at::Tensor> mha_fwd(
     uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
     uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
     uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
@@ -418,7 +418,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
     uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
     uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
@@ -435,7 +435,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        uint32_t mask_len = KernelCommon::MASK_LEN;
+        uint32_t mask_len = KernelCommon::MAX_KV_STACK_LEN;
         at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));

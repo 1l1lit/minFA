@@ -62,8 +62,6 @@ public:
     using ElementUpdate = typename EpilogueRescaleO::ElementUpdate;
     using LayoutUpdate = typename EpilogueRescaleO::LayoutUpdate;
 
-    CATLASS_DEVICE FAInferKernel() = default;
-
     CATLASS_DEVICE void operator()(FAIKernelParams const& params)
     {
         auto fATilingData = reinterpret_cast<__gm__ FAInferTilingData*>(params.tiling);
@@ -89,7 +87,7 @@ public:
         AscendC::GlobalTensor<ElementMask> gMask;
         gMask.SetGlobalBuffer((__gm__ ElementMask*)params.mask);
         AscendC::GlobalTensor<int32_t> gBlockTable;
-        gBlockTable.SetGlobalBuffer((__gm__ int32_t*)(params.blockTable));
+        gBlockTable.SetGlobalBuffer((__gm__ int32_t*)params.blockTable);
         AscendC::GlobalTensor<int32_t> gActualQseqlen;
         gActualQseqlen.SetGlobalBuffer((__gm__ int32_t*)params.actualQseqlen);
         AscendC::GlobalTensor<int32_t> gActualKvseqlen;
@@ -97,8 +95,10 @@ public:
 
         AscendC::GlobalTensor<ElementO> gO;
         gO.SetGlobalBuffer((__gm__ ElementO*)params.o);
+        gO.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
         AscendC::GlobalTensor<ElementLse> gLse;
         gLse.SetGlobalBuffer((__gm__ ElementLse*)params.lse);
+        gLse.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
 
         AscendC::GlobalTensor<ElementS> gS;
         gS.SetGlobalBuffer((__gm__ ElementS*)(params.workspace));
@@ -112,8 +112,6 @@ public:
         if ASCEND_IS_AIC {
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID2);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID3);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
@@ -281,7 +279,7 @@ public:
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
                                 AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
                             }
-                            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTmp, qSBlockSize, qNBlockSize, qHeads);
+                            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTmp, qSBlockSize, qNBlockSize, strideQ);
                         }
 
                         kvSIdx = 0;
@@ -320,7 +318,7 @@ public:
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
                         LayoutP layoutP(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
-                        LayoutMask layoutMask(MASK_LEN, MASK_LEN);
+                        LayoutMask layoutMask(MAX_KV_STACK_LEN, MAX_KV_STACK_LEN);
                         uint64_t gmOffsetP = gmOffsetS;
                         uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN;
                         uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;
@@ -401,8 +399,6 @@ public:
         if ASCEND_IS_AIC {
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID2);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID3);
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
@@ -467,10 +463,13 @@ private:
 
 private:
     Arch::Resource<ArchTag> resource;
+    uint32_t l1PingPong = 0;
+    uint32_t l0ABPingPong = 0;
+    uint32_t l0CPingPong = 0;
 
-    BlockMmadQK blockMmadQK;
-    BlockMmadPV blockMmadPV;
+    BlockMmadQK blockMmadQK{l1PingPong, l0ABPingPong, l0CPingPong};
     EpilogueOnlineSoftmax epilogueOnlineSoftmax;
+    BlockMmadPV blockMmadPV{l1PingPong, l0ABPingPong, l0CPingPong};
     EpilogueRescaleO epilogueRescaleO;
 
     LayoutQ layoutQTmp;

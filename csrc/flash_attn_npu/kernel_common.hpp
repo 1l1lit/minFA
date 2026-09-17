@@ -16,7 +16,6 @@ constexpr uint32_t PV_READY_ID = 3;
 constexpr uint32_t MAX_KV_STACK_LEN = 512; // KV 分块的大小上限
 constexpr uint32_t Q_TILE_CEIL = 128;      // Q 分块的大小上限
 constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = Q_TILE_CEIL * MAX_KV_STACK_LEN;
-constexpr uint32_t MASK_LEN = 2048;
 constexpr uint32_t MAX_UB_ELEM_NUM = 8192;
 constexpr uint32_t MAX_ROW_NUM_SUB_CORE = 64;
 constexpr uint32_t PRE_LAUNCH = 1;

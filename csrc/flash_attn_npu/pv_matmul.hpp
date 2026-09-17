@@ -68,9 +68,8 @@ public:
 
     static_assert(std::is_same_v<LayoutC, layout::RowMajor>, "LayoutC only support RowMajor yet!");
 
-    CATLASS_DEVICE BlockMmad() = default;
-
-    CATLASS_DEVICE ~BlockMmad() = default;
+    CATLASS_DEVICE BlockMmad(uint32_t& l1APingPong_, uint32_t& l0ABPingPong_, uint32_t& l0CPingPong_)
+        : l1APingPong(l1APingPong_), l0ABPingPong(l0ABPingPong_), l0CPingPong(l0CPingPong_) {};
 
     CATLASS_DEVICE void init(
         Arch::Resource<ArchTag>& resource, uint32_t kDyn, uint32_t VStackLen = MAX_KV_STACK_LEN,
@@ -181,6 +180,15 @@ public:
                     for (uint32_t kL0Idx = 0; kL0Idx < kL0Loop; kL0Idx++) {
                         uint32_t kL0Actual =
                             (kL0Idx == kL0Loop - 1) ? (kL1Actual - kL0Idx * L0TileShape::K) : L0TileShape::K;
+                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(
+                            l0ABPingPong); // 等待上一轮 M 计算完成，再进行 L1 -> L0 搬运
+
+                        // V: L1 -> L0
+                        LayoutBInL0 layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kL0Actual, nL1Actual);
+                        MatrixCoord l1BTileCoord{
+                            kL1Idx * l1KDynamic + kL0Idx * L0TileShape::K, L0TileShape::N * nL1Idx};
+                        auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BTileCoord)];
+                        copyL1ToL0B(l0BTensor[l0ABPingPong], l1BTile, layoutBInL0, layoutBInL1);
 
                         // P: L1 -> L0
                         LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mL1Actual, kL0Actual);
@@ -190,22 +198,11 @@ public:
                             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(
                                 l1APingPong); // 等待 GM -> L1 搬运完成，再进行 L1 -> L0 搬运
                         }
-                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(
-                            l0ABPingPong); // 等待上一轮 M 计算完成，再进行 L1 -> L0 搬运
                         copyL1ToL0A(l0ATensor[l0ABPingPong], l1ATile, layoutAInL0, layoutAInL1);
                         if (kL0Idx == kL0Loop - 1) {
                             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(
                                 l1APingPong); // 通知 L1 -> L0 搬运完成，可以进行下一轮 GM -> L1 搬运
                         }
-
-                        // V: L1 -> L0
-                        LayoutBInL0 layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kL0Actual, nL1Actual);
-                        MatrixCoord l1BTileCoord{
-                            kL1Idx * l1KDynamic + kL0Idx * L0TileShape::K, L0TileShape::N * nL1Idx};
-                        auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BTileCoord)];
-                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(
-                            l0ABPingPong + 2); // 等待上一轮 M 计算完成，再进行 L1 -> L0 搬运
-                        copyL1ToL0B(l0BTensor[l0ABPingPong], l1BTile, layoutBInL0, layoutBInL1);
 
                         // 等待 L1 -> L0 搬运完成，再进行 M 计算
                         AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
@@ -216,10 +213,8 @@ public:
                         tileMmad(
                             l0CTensor[l0CPingPong], l0ATensor[l0ABPingPong], l0BTensor[l0ABPingPong], mL0Align,
                             nL1Actual, kL0Actual, (kL1Idx == 0) && (kL0Idx == 0));
-
-                        // 通知 M 计算完成，可以进行下一轮 L1 -> L0 搬运
-                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong);
-                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPong + 2);
+                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(
+                            l0ABPingPong); // 通知 M 计算完成，可以进行下一轮 L1 -> L0 搬运
 
                         l0ABPingPong ^= 1;
                     }
@@ -261,9 +256,9 @@ protected:
     CopyL1ToL0B copyL1ToL0B;
     CopyL0CToGm copyL0CToGm;
 
-    uint32_t l1APingPong = 0;
-    uint32_t l0ABPingPong = 0;
-    uint32_t l0CPingPong = 0;
+    uint32_t& l1APingPong;
+    uint32_t& l0ABPingPong;
+    uint32_t& l0CPingPong;
 
     uint32_t l1KDynamic = 0;
     uint32_t blockStartOffset = 0;
