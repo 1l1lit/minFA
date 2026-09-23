@@ -33,10 +33,6 @@ public:
     using LayoutInput = typename InputType_::Layout;
     using LayoutMask = typename MaskType_::Layout;
 
-    CATLASS_DEVICE BlockEpilogue() = default;
-
-    CATLASS_DEVICE ~BlockEpilogue() = default;
-
     CATLASS_DEVICE void init(Arch::Resource<ArchTag>& resource, float scaleVal_)
     {
         scaleVal = scaleVal_;
@@ -47,12 +43,12 @@ public:
         constexpr uint32_t MASK16_OFFSET = 5 * UB_BLK_SIZE;
 
         constexpr uint32_t GM_OFFSET = 10 * UB_BLK_SIZE;
-        constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + UB_RPT_SIZE;
+        constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + 4 * UB_RPT_SIZE;
 
         constexpr uint32_t LM_OFFSET = 11 * UB_BLK_SIZE;
-        constexpr uint32_t HM_OFFSET = 11 * UB_BLK_SIZE + UB_RPT_SIZE;
-        constexpr uint32_t DM_OFFSET = 11 * UB_BLK_SIZE + 2 * UB_RPT_SIZE;
-        constexpr uint32_t LL_OFFSET = 11 * UB_BLK_SIZE + UB_VEC_SIZE;
+        constexpr uint32_t HM_OFFSET = 11 * UB_BLK_SIZE + 2 * UB_RPT_SIZE;
+        constexpr uint32_t DM_OFFSET = 11 * UB_BLK_SIZE + 4 * UB_RPT_SIZE;
+        constexpr uint32_t LL_OFFSET = 11 * UB_BLK_SIZE + 8 * UB_RPT_SIZE;
         constexpr uint32_t TB_OFFSET = 11 * UB_BLK_SIZE + 10 * UB_VEC_SIZE;
         constexpr uint32_t TV_OFFSET = 11 * UB_BLK_SIZE + 12 * UB_VEC_SIZE;
 
@@ -74,7 +70,7 @@ public:
     CATLASS_DEVICE void set_curTaskMod(uint32_t curTaskMod)
     {
         taskEvent = curTaskMod + 2;
-        taskOffset = curTaskMod * (2 * UB_RPT_SIZE);
+        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
     }
 
     CATLASS_DEVICE void RowMax512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
@@ -410,7 +406,7 @@ public:
         uint32_t dmOffset = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowOffset;
 
         if (isFirstStackTile && isFirstRowLoop) {
-            WaitFlag<HardEvent::MTE3_V>(taskEvent); // 等待上个 task 的 RS 完成
+            WaitFlag<HardEvent::MTE3_V>(taskEvent); // 等待上个 task 释放临时空间
         }
 
         CalcLocalRowMax(rowOffset, rowNum, colNum, colNumRound);

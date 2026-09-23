@@ -35,19 +35,15 @@ public:
     using LayoutUpdate = typename UpdateType_::Layout;
     using LayoutLse = typename LseType_::Layout;
 
-    CATLASS_DEVICE BlockEpilogue() = default;
-
-    CATLASS_DEVICE ~BlockEpilogue() = default;
-
     CATLASS_DEVICE void init(Arch::Resource<ArchTag>& resource)
     {
         constexpr uint32_t LO_OFFSET = 6 * UB_BLK_SIZE;
         constexpr uint32_t GO_OFFSET = 8 * UB_BLK_SIZE;
 
         constexpr uint32_t GM_OFFSET = 10 * UB_BLK_SIZE;
-        constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + UB_RPT_SIZE;
+        constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + 4 * UB_RPT_SIZE;
 
-        constexpr uint32_t DM_OFFSET = 11 * UB_BLK_SIZE + 2 * UB_RPT_SIZE;
+        constexpr uint32_t DM_OFFSET = 11 * UB_BLK_SIZE + 4 * UB_RPT_SIZE;
         constexpr uint32_t TV_OFFSET = 11 * UB_BLK_SIZE + 12 * UB_VEC_SIZE;
 
         lo = resource.ubBuf.template GetBufferByByte<float>(LO_OFFSET);
@@ -63,7 +59,7 @@ public:
     CATLASS_DEVICE void set_curTaskMod(uint32_t curTaskMod)
     {
         taskEvent = curTaskMod + 2;
-        taskOffset = curTaskMod * (2 * UB_RPT_SIZE);
+        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
     }
 
     CATLASS_DEVICE void CopyOToGm(
@@ -121,9 +117,9 @@ public:
             }
 
             // go = go * dm_block
-            for (uint32_t vmul_idx = 0; vmul_idx < embed / FLT_PER_REPEAT; vmul_idx++) {
+            for (uint32_t idx = 0; idx < embed / FLT_PER_REPEAT; idx++) {
                 Mul<float, false>(
-                    go32[vmul_idx * FLT_PER_REPEAT], go32[vmul_idx * FLT_PER_REPEAT], tv, MASK_NUL, rowNum,
+                    go32[idx * FLT_PER_REPEAT], go32[idx * FLT_PER_REPEAT], tv, MASK_NUL, rowNum,
                     BinaryRepeatParams(1, 1, 0, embedRound / FLT_PER_DATABLOCK, embedRound / FLT_PER_DATABLOCK, 1));
             }
             if (embed % FLT_PER_REPEAT > 0) {
@@ -150,9 +146,9 @@ public:
             PipeBarrier<PIPE_V>();
 
             // go = go / gl_block
-            for (uint32_t vdiv_idx = 0; vdiv_idx < embed / FLT_PER_REPEAT; vdiv_idx++) {
+            for (uint32_t idx = 0; idx < embed / FLT_PER_REPEAT; idx++) {
                 Div<float, false>(
-                    go32[vdiv_idx * FLT_PER_REPEAT], go32[vdiv_idx * FLT_PER_REPEAT], tv, MASK_NUL, rowNum,
+                    go32[idx * FLT_PER_REPEAT], go32[idx * FLT_PER_REPEAT], tv, MASK_NUL, rowNum,
                     BinaryRepeatParams(1, 1, 0, embedRound / FLT_PER_DATABLOCK, embedRound / FLT_PER_DATABLOCK, 1));
             }
             if (embed % FLT_PER_REPEAT > 0) {
@@ -164,18 +160,6 @@ public:
                 ResetMask();
             }
             PipeBarrier<PIPE_V>();
-
-            // go = castfp32to16(go)
-            RoundMode roundMode =
-                std::is_same_v<ElementOutput, bfloat16_t> ? RoundMode::CAST_RINT : RoundMode::CAST_NONE;
-            Cast<ElementOutput, float, false>(
-                go16, go32, roundMode, MASK_NUL, CeilDiv(rowNum * embedRound, FLT_PER_REPEAT),
-                UnaryRepeatParams(1, 1, 4, 8));
-            SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
-            WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
-
-            // move O to GM
-            CopyOToGm(gOutput, rowNum, rowOffset, qSBlockSize, embed, strideO);
 
             // move lse to GM
             if (isLastRowLoop) {
@@ -189,8 +173,21 @@ public:
                 SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
                 WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
                 DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, inRowActual * sizeof(float), 0, 0, 0));
-                SetFlag<HardEvent::MTE3_V>(taskEvent); // 通知当前 task 的 RS 完成
+                SetFlag<HardEvent::MTE3_V>(taskEvent); // 通知当前 task 已释放临时空间
             }
+
+            // go = castfp32to16(go)
+            RoundMode roundMode =
+                std::is_same_v<ElementOutput, bfloat16_t> ? RoundMode::CAST_RINT : RoundMode::CAST_NONE;
+            Cast<ElementOutput, float, false>(
+                go16, go32, roundMode, MASK_NUL, CeilDiv(rowNum * embedRound, FLT_PER_REPEAT),
+                UnaryRepeatParams(1, 1, 4, 8));
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+
+            // move O to GM
+            CopyOToGm(gOutput, rowNum, rowOffset, qSBlockSize, embed, strideO);
+
         } else if (multipleRowLoop) {
             SetFlag<HardEvent::V_MTE3>(EVENT_ID5);
             WaitFlag<HardEvent::V_MTE3>(EVENT_ID5);
