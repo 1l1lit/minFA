@@ -104,6 +104,9 @@ public:
         uint32_t rowNumRound = RoundUp(rowNum, L1AAlignHelper::M_ALIGNED);
         auto layoutASingleNd = layoutA.GetTileLayout(MakeCoord(qNBlockSize, embed));
         LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(rowNum, embed);
+
+        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
+            EVENT_ID2); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
         copyGmToL1A(
             l1ATensor,       // dstTensor
             gA,              // srcTensor
@@ -114,14 +117,14 @@ public:
             qSBlockSize,     // dstNzNStride
             NUM_16,          // dstNzMatrixStride
             rowNumRound);    // dstNzC0Stride
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
     }
 
     CATLASS_DEVICE void operator()(
         const AscendC::GlobalTensor<ElementB>& gB, const AscendC::GlobalTensor<ElementC>& gC,
         const AscendC::GlobalTensor<int32_t>& gBlockTable, const LayoutB& layoutB, const LayoutC& layoutC,
-        GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideK)
+        GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideK, uint32_t isLastStackTile)
     {
         uint32_t rowNum = actualOriShape.m();
         uint32_t stackSeqTile = actualOriShape.n();
@@ -255,6 +258,11 @@ public:
             }
 
             l1BPingPong ^= 1;
+        }
+
+        if (isLastStackTile) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(
+                EVENT_ID2); // 通知 L1 -> L0 搬运完成，可以进行下一轮 GM -> L1 搬运
         }
     }
 

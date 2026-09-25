@@ -96,24 +96,24 @@ public:
 
         if (isFirstStackTile) {
             // go = lo
-            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
             DataCopy(go32, gInput, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
-            SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
-            WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID3);
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID3);
         } else {
             WaitFlag<HardEvent::V_MTE2>(EVENT_ID2);
             DataCopy(lo, gInput, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
-            SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID3);
 
             // dm_block = expand_to_block(dm)
             Brcb(tv, dm[dmOffset], CeilDiv(rowNum, FLT_PER_DATABLOCK), BrcbRepeatParams());
             PipeBarrier<PIPE_V>();
 
-            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
             if (multipleRowLoop) {
                 DataCopy(go32, gUpdate, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
-                SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
-                WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
+                SetFlag<HardEvent::MTE2_V>(EVENT_ID4);
+                WaitFlag<HardEvent::MTE2_V>(EVENT_ID4);
             }
 
             // go = go * dm_block
@@ -133,7 +133,7 @@ public:
             PipeBarrier<PIPE_V>();
 
             // go = lo + go
-            WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID3);
             Add<float, false>(
                 go32, go32, lo, MASK_NUL, CeilDiv(rowNum * embedRound, FLT_PER_REPEAT), BinaryRepeatParams());
             PipeBarrier<PIPE_V>();
@@ -170,8 +170,8 @@ public:
                 Add<float, false>(
                     lse[taskOffset], lse[taskOffset], gm[taskOffset], MASK_NUL, CeilDiv(inRowActual, FLT_PER_REPEAT),
                     BinaryRepeatParams());
-                SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
-                WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
+                SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
+                WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
                 DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, inRowActual * sizeof(float), 0, 0, 0));
                 SetFlag<HardEvent::MTE3_V>(taskEvent); // 通知当前 task 已释放临时空间
             }
@@ -182,18 +182,18 @@ public:
             Cast<ElementOutput, float, false>(
                 go16, go32, roundMode, MASK_NUL, CeilDiv(rowNum * embedRound, FLT_PER_REPEAT),
                 UnaryRepeatParams(1, 1, 4, 8));
-            SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
-            WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
 
             // move O to GM
             CopyOToGm(gOutput, rowNum, rowOffset, qSBlockSize, embed, strideO);
 
         } else if (multipleRowLoop) {
-            SetFlag<HardEvent::V_MTE3>(EVENT_ID5);
-            WaitFlag<HardEvent::V_MTE3>(EVENT_ID5);
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
             DataCopy(gUpdate, go32, DataCopyParams(1, rowNum * embedRound / FLT_PER_DATABLOCK, 0, 0));
         }
-        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
 
     CATLASS_DEVICE void operator()(

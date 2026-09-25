@@ -39,8 +39,8 @@ public:
 
         constexpr uint32_t LS_OFFSET = 0;
         constexpr uint32_t LP_OFFSET = 4 * UB_BLK_SIZE;
-        constexpr uint32_t MASK_OFFSET = 4 * UB_BLK_SIZE;
-        constexpr uint32_t MASK16_OFFSET = 5 * UB_BLK_SIZE;
+        constexpr uint32_t MASK_OFFSET = 6 * UB_BLK_SIZE;
+        constexpr uint32_t MASK16_OFFSET = 7 * UB_BLK_SIZE;
 
         constexpr uint32_t GM_OFFSET = 10 * UB_BLK_SIZE;
         constexpr uint32_t GL_OFFSET = 10 * UB_BLK_SIZE + 4 * UB_RPT_SIZE;
@@ -305,8 +305,8 @@ public:
     }
 
     CATLASS_DEVICE void CopyMaskToUb(
-        const GlobalTensor<ElementMask>& gMask, uint32_t rowNum, uint32_t maskColRound, uint32_t maskStride,
-        uint32_t rowOffset, uint32_t qSBlockSize)
+        const GlobalTensor<ElementMask>& gMask, uint32_t rowNum, uint32_t colNumRound, uint32_t maskColRound,
+        uint32_t maskStride, uint32_t rowOffset, uint32_t qSBlockSize)
     {
         uint32_t qSIdxCurBlock = rowOffset % qSBlockSize;
         uint32_t rowsDone = 0;
@@ -322,6 +322,16 @@ public:
 
     CATLASS_DEVICE void ApplyMask(uint32_t rowNum, uint32_t colNumRound, uint32_t maskColRound, uint32_t addMaskOffset)
     {
+        Cast<half, ElementMask, false>(
+            mask16, mask, RoundMode::CAST_NONE, MASK_NUL, CeilDiv(rowNum * colNumRound, HALF_PER_REPEAT),
+            UnaryRepeatParams(1, 1, 8, 4));
+        PipeBarrier<PIPE_V>();
+
+        Cast<float, half, false>(
+            mask32, mask16, RoundMode::CAST_NONE, MASK_NUL, CeilDiv(rowNum * colNumRound, FLT_PER_REPEAT),
+            UnaryRepeatParams(1, 1, 8, 4));
+        PipeBarrier<PIPE_V>();
+
         Muls<float, false>(
             mask32, mask32, -3e38f /* -FLT_MAX */, MASK_NUL, CeilDiv(rowNum * maskColRound, FLT_PER_REPEAT),
             UnaryRepeatParams());
@@ -394,11 +404,9 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    template <bool DO_TRIU_MASK_>
     CATLASS_DEVICE void SubCoreCompute(
         const GlobalTensor<ElementOutput>& gOutput, const LayoutOutput& layoutOutput, uint32_t rowOffset,
-        uint32_t isFirstStackTile, uint32_t isLastNoMaskStackTile, uint32_t isFirstRowLoop, uint32_t isLastRowLoop,
-        uint32_t colNumRound, uint32_t curStackTileMod)
+        uint32_t isFirstStackTile, uint32_t isFirstRowLoop, uint32_t colNumRound, uint32_t curStackTileMod)
     {
         uint32_t rowNum = layoutOutput.shape(0);
         uint32_t colNum = layoutOutput.shape(1);
@@ -414,12 +422,9 @@ public:
 
         CalcExp(rowNum, colNum, colNumRound, rowOffset);
 
-        if constexpr (!DO_TRIU_MASK_) {
-            WaitFlag<HardEvent::MTE3_V>(pingPong);
-        }
-
         // lp = castfp32to16(ls)
         RoundMode roundMode = std::is_same_v<ElementOutput, bfloat16_t> ? RoundMode::CAST_RINT : RoundMode::CAST_NONE;
+        WaitFlag<HardEvent::MTE3_V>(pingPong);
         Cast<ElementOutput, float, false>(
             lp[pingPongOffset], ls[pingPongOffset], roundMode, MASK_NUL, CeilDiv(rowNum * colNumRound, FLT_PER_REPEAT),
             UnaryRepeatParams(1, 1, 4, 8));
@@ -433,16 +438,7 @@ public:
             gOutput, lp[pingPongOffset],
             DataCopyParams(
                 rowNum, colNumRound / HALF_PER_DATABLOCK, 0, (colStride - colNumRound) / HALF_PER_DATABLOCK));
-
-        if constexpr (!DO_TRIU_MASK_) {
-            SetFlag<HardEvent::MTE3_V>(pingPong);
-            if (isLastNoMaskStackTile && isLastRowLoop) {
-                WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
-                SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
-            }
-        } else {
-            SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
-        }
+        SetFlag<HardEvent::MTE3_V>(pingPong);
 
         UpdateGlobalRowSum(rowNum, dmOffset, rowOffset, isFirstStackTile);
     }
@@ -450,8 +446,7 @@ public:
     CATLASS_DEVICE void operator()(
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, GemmCoord actualBlockShape,
-        uint32_t isFirstStackTile, uint32_t isLastNoMaskStackTile, uint32_t qSBlockSize, uint32_t qNBlockSize,
-        uint32_t curStackTileMod)
+        uint32_t isFirstStackTile, uint32_t qSBlockSize, uint32_t qNBlockSize, uint32_t curStackTileMod)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t colNum = actualBlockShape.n();
@@ -472,11 +467,11 @@ public:
         uint32_t rowLoop = CeilDiv(coreRowActual, rowNumTile);
 
         for (uint32_t rowIdx = 0; rowIdx < rowLoop + PRE_LAUNCH; rowIdx++) {
-            if (rowIdx < rowLoop) {
-                uint32_t rowOffset = rowIdx * rowNumTile;
-                uint32_t gmRowOffset = rowOffset + coreRowOffset;
-                uint32_t rowNumCurLoop = (rowIdx == rowLoop - 1) ? (coreRowActual - rowOffset) : rowNumTile;
+            uint32_t rowOffset = rowIdx * rowNumTile;
+            uint32_t gmRowOffset = rowOffset + coreRowOffset;
+            uint32_t rowNumCurLoop = (rowIdx == rowLoop - 1) ? (coreRowActual - rowOffset) : rowNumTile;
 
+            if (rowIdx < rowLoop) {
                 WaitFlag<HardEvent::V_MTE2>(pingPong);
                 DataCopy(
                     ls[pingPongOffset], gInput[layoutInput.GetOffset(MatrixCoord(gmRowOffset, 0))],
@@ -491,17 +486,17 @@ public:
 
             if (rowIdx >= PRE_LAUNCH) {
                 uint32_t nowRowIdx = rowIdx - PRE_LAUNCH;
-                uint32_t rowOffset = nowRowIdx * rowNumTile;
-                uint32_t gmRowOffset = rowOffset + coreRowOffset;
-                uint32_t rowNumCurLoop = (nowRowIdx == rowLoop - 1) ? (coreRowActual - rowOffset) : rowNumTile;
+                uint32_t nowRowOffset = nowRowIdx * rowNumTile;
+                uint32_t rowNumNowLoop = (nowRowIdx == rowLoop - 1) ? (coreRowActual - nowRowOffset) : rowNumTile;
 
                 WaitFlag<HardEvent::MTE2_V>(pingPong);
-                ScaleS(rowNumCurLoop, colNumRound);
+                ScaleS(rowNumNowLoop, colNumRound);
 
-                SubCoreCompute<false>(
+                uint32_t gmRowOffset = nowRowOffset + coreRowOffset;
+                SubCoreCompute(
                     gOutput[layoutOutput.GetOffset(MatrixCoord(gmRowOffset, 0))],
-                    layoutOutput.GetTileLayout(MatrixCoord(rowNumCurLoop, colNum)), rowOffset, isFirstStackTile,
-                    isLastNoMaskStackTile, (nowRowIdx == 0), (nowRowIdx == rowLoop - 1), colNumRound, curStackTileMod);
+                    layoutOutput.GetTileLayout(MatrixCoord(rowNumNowLoop, colNum)), nowRowOffset, isFirstStackTile,
+                    (nowRowIdx == 0), colNumRound, curStackTileMod);
             }
         }
     }
@@ -510,7 +505,7 @@ public:
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const GlobalTensor<ElementMask>& gMask, const LayoutOutput& layoutOutput, const LayoutInput& layoutInput,
         const LayoutInput& layoutMask, GemmCoord actualBlockShape, uint32_t isFirstStackTile, uint32_t qSBlockSize,
-        uint32_t qNBlockSize, uint32_t curStackTileMod, Arch::CrossCoreFlag qkReady, uint32_t triUp, uint32_t triDown,
+        uint32_t qNBlockSize, uint32_t curStackTileMod, Arch::CrossCoreFlag qkReady, uint32_t triUp,
         uint32_t kvSStartIdx, uint32_t kvSEndIdx)
     {
         uint32_t rowNum = actualBlockShape.m();
@@ -529,45 +524,43 @@ public:
             return;
         }
 
-        // calc mask shift in GM
-        uint32_t gmMaskRowOffset;
-        uint32_t gmMaskColOffset;
+        uint32_t rowNumTile = RoundDown(MAX_UB_ELEM_NUM / colNumRound, FLT_PER_DATABLOCK);
+        rowNumTile = Min(rowNumTile, FLT_PER_REPEAT);
+        uint32_t rowLoop = CeilDiv(coreRowActual, rowNumTile);
+
+        // calc mask offset
+        uint32_t gmMaskRow;
+        uint32_t gmMaskCol;
         uint32_t maskCol;
         uint32_t addMaskOffset;
         if (triUp >= kvSStartIdx) {
             uint32_t triUpRound = RoundDown(triUp, NUM_32);
-            gmMaskRowOffset = triUp - triUpRound + ((qNBlockSize == 1) ? coreRowOffset : 0);
-            gmMaskColOffset = 0;
+            gmMaskRow = triUp - triUpRound + ((qNBlockSize == 1) ? coreRowOffset : 0);
+            gmMaskCol = 0;
             maskCol = kvSEndIdx - triUpRound;
             addMaskOffset = triUpRound - kvSStartIdx;
         } else {
-            gmMaskRowOffset = (qNBlockSize == 1) ? coreRowOffset : 0;
-            gmMaskColOffset = kvSStartIdx - triUp;
+            gmMaskRow = (qNBlockSize == 1) ? coreRowOffset : 0;
+            gmMaskCol = kvSStartIdx - triUp;
             maskCol = colNum;
             addMaskOffset = 0;
         }
         uint32_t maskColRound = RoundUp(maskCol, NUM_32);
 
-        uint32_t rowNumTile = RoundDown(MAX_UB_ELEM_NUM / colNumRound, FLT_PER_DATABLOCK);
-        rowNumTile = Min(rowNumTile, FLT_PER_REPEAT);
-        uint32_t rowLoop = CeilDiv(coreRowActual, rowNumTile);
+        // load mask before cross core sync
+        WaitFlag<HardEvent::V_MTE2>(EVENT_ID2);
+        CopyMaskToUb(
+            gMask[layoutMask.GetOffset(MatrixCoord(gmMaskRow, gmMaskCol))], Min(rowNumTile, coreRowActual), colNumRound,
+            maskColRound, maskStride, 0, qSBlockSize);
+        SetFlag<HardEvent::MTE2_V>(EVENT_ID2);
+        Arch::CrossCoreWaitFlag(qkReady);
 
         for (uint32_t rowIdx = 0; rowIdx < rowLoop + PRE_LAUNCH; rowIdx++) {
+            uint32_t rowOffset = rowIdx * rowNumTile;
+            uint32_t gmRowOffset = rowOffset + coreRowOffset;
+            uint32_t rowNumCurLoop = (rowIdx == rowLoop - 1) ? (coreRowActual - rowOffset) : rowNumTile;
+
             if (rowIdx < rowLoop) {
-                uint32_t rowOffset = rowIdx * rowNumTile;
-                uint32_t gmRowOffset = rowOffset + coreRowOffset;
-                uint32_t rowNumCurLoop = (rowIdx == rowLoop - 1) ? (coreRowActual - rowOffset) : rowNumTile;
-
-                // loop 0 mask load before cross core sync
-                if (rowIdx == 0) {
-                    WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
-                    CopyMaskToUb(
-                        gMask[layoutMask.GetOffset(MatrixCoord(gmMaskRowOffset, gmMaskColOffset))], rowNumCurLoop,
-                        maskColRound, maskStride, rowOffset, qSBlockSize);
-                    SetFlag<HardEvent::MTE2_V>(EVENT_ID2);
-                    Arch::CrossCoreWaitFlag(qkReady);
-                }
-
                 WaitFlag<HardEvent::V_MTE2>(pingPong);
                 DataCopy(
                     ls[pingPongOffset], gInput[layoutInput.GetOffset(MatrixCoord(gmRowOffset, 0))],
@@ -582,36 +575,29 @@ public:
 
             if (rowIdx >= PRE_LAUNCH) {
                 uint32_t nowRowIdx = rowIdx - PRE_LAUNCH;
-                uint32_t rowOffset = nowRowIdx * rowNumTile;
-                uint32_t gmRowOffset = rowOffset + coreRowOffset;
-                uint32_t rowNumCurLoop = (nowRowIdx == rowLoop - 1) ? (coreRowActual - rowOffset) : rowNumTile;
+                uint32_t nowRowOffset = nowRowIdx * rowNumTile;
+                uint32_t rowNumNowLoop = (nowRowIdx == rowLoop - 1) ? (coreRowActual - nowRowOffset) : rowNumTile;
 
-                if (nowRowIdx > 0) {
-                    WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
+                WaitFlag<HardEvent::MTE2_V>(pingPong);
+                ScaleS(rowNumNowLoop, colNumRound);
+
+                WaitFlag<HardEvent::MTE2_V>(EVENT_ID2);
+                ApplyMask(rowNumNowLoop, colNumRound, maskColRound, addMaskOffset);
+                SetFlag<HardEvent::V_MTE2>(EVENT_ID2);
+
+                if (rowIdx < rowLoop) {
+                    WaitFlag<HardEvent::V_MTE2>(EVENT_ID2);
                     CopyMaskToUb(
-                        gMask[layoutMask.GetOffset(MatrixCoord(gmMaskRowOffset, gmMaskColOffset))], rowNumCurLoop,
+                        gMask[layoutMask.GetOffset(MatrixCoord(gmMaskRow, gmMaskCol))], rowNumCurLoop, colNumRound,
                         maskColRound, maskStride, rowOffset, qSBlockSize);
                     SetFlag<HardEvent::MTE2_V>(EVENT_ID2);
                 }
 
-                WaitFlag<HardEvent::MTE2_V>(EVENT_ID2);
-                Cast<half, ElementMask, false>(
-                    mask16, mask, RoundMode::CAST_NONE, MASK_NUL, CeilDiv(rowNumCurLoop * colNumRound, HALF_PER_REPEAT),
-                    UnaryRepeatParams(1, 1, 8, 4));
-                PipeBarrier<PIPE_V>();
-                Cast<float, half, false>(
-                    mask32, mask16, RoundMode::CAST_NONE, MASK_NUL,
-                    CeilDiv(rowNumCurLoop * colNumRound, FLT_PER_REPEAT), UnaryRepeatParams(1, 1, 8, 4));
-                PipeBarrier<PIPE_V>();
-
-                WaitFlag<HardEvent::MTE2_V>(pingPong);
-                ScaleS(rowNumCurLoop, colNumRound);
-                ApplyMask(rowNumCurLoop, colNumRound, maskColRound, addMaskOffset);
-
-                SubCoreCompute<true>(
+                uint32_t gmRowOffset = nowRowOffset + coreRowOffset;
+                SubCoreCompute(
                     gOutput[layoutOutput.GetOffset(MatrixCoord(gmRowOffset, 0))],
-                    layoutOutput.GetTileLayout(MatrixCoord(rowNumCurLoop, colNum)), rowOffset, isFirstStackTile, 0,
-                    (nowRowIdx == 0), (nowRowIdx == rowLoop - 1), colNumRound, curStackTileMod);
+                    layoutOutput.GetTileLayout(MatrixCoord(rowNumNowLoop, colNum)), nowRowOffset, isFirstStackTile,
+                    (nowRowIdx == 0), colNumRound, curStackTileMod);
             }
         }
     }

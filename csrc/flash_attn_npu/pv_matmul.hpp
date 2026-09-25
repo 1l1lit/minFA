@@ -104,7 +104,7 @@ public:
 
         // V: GM -> L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
-            EVENT_ID2); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
+            EVENT_ID3); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
         if constexpr (PAGED_CACHE_FLAG_) {
             blockStartOffset = 0;
             uint32_t blockStart = 0;
@@ -145,8 +145,8 @@ public:
         }
 
         // 等待 GM -> L1 搬运完成，再进行 L1 -> L0 搬运
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
 
         // 等待 P 就绪
         Arch::CrossCoreWaitFlag(softmaxReady);
@@ -239,7 +239,7 @@ public:
         }
 
         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(
-            EVENT_ID2); // 通知 L1 -> L0 搬运完成，可以进行下一轮 GM -> L1 搬运
+            EVENT_ID3); // 通知 L1 -> L0 搬运完成，可以进行下一轮 GM -> L1 搬运
     }
 
 protected:
