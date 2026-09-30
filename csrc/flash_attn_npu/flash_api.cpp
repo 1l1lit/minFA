@@ -144,7 +144,6 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
-    tiling_cpu_ptr->set_workspaceSize(workspaceSize);
 
     at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
     at::Tensor softmax_lse =
@@ -294,7 +293,6 @@ std::vector<at::Tensor> mha_fwd(
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
-    tiling_cpu_ptr->set_workspaceSize(workspaceSize);
 
     // device ptrs
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
@@ -426,7 +424,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
     tiling_cpu_ptr->set_UpdateSize(UpdateSize);
-    tiling_cpu_ptr->set_workspaceSize(workspaceSize);
 
     at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
     at::Tensor softmax_lse = at::empty({num_heads, total_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));

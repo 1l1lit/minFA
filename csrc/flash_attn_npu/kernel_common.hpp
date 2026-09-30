@@ -13,6 +13,7 @@ namespace KernelCommon {
 constexpr uint32_t QK_READY_ID = 1;
 constexpr uint32_t SOFTMAX_READY_ID = 2;
 constexpr uint32_t PV_READY_ID = 3;
+constexpr uint32_t N_SPLIT_HELPER = 2;
 constexpr uint32_t Q_TILE_CEIL = 256;      // Q 分块的大小上限
 constexpr uint32_t MAX_KV_STACK_LEN = 512; // KV 分块的大小上限
 constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = Q_TILE_CEIL * MAX_KV_STACK_LEN;
@@ -55,18 +56,6 @@ struct FAIKernelParams {
     GM_ADDR workspace;
     GM_ADDR tiling;
 };
-
-// 获取 Q 的 N 维分块大小
-CATLASS_DEVICE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
-{
-    uint32_t qNBlockTile = Q_TILE_CEIL / qSeqlen;
-    qNBlockTile = Min(qNBlockTile, groupSize); // qNBlock 不能跨 group
-    qNBlockTile = Max(qNBlockTile, 1u);        // qNBlock 大小至少为 1
-    return qNBlockTile;
-}
-
-// 获取 Q 的 S 维分块大小
-CATLASS_DEVICE uint32_t GetQSBlockTile() { return Q_TILE_CEIL; }
 
 // 设置向量掩码
 CATLASS_DEVICE void SetVecMaskLen(uint32_t len)

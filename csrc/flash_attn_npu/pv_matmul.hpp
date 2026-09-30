@@ -151,8 +151,8 @@ public:
         // 等待 P 就绪
         Arch::CrossCoreWaitFlag(softmaxReady);
 
-        uint32_t mL1Loop = CeilDiv(rowNum, L1TileShape::M);
-        uint32_t nL1Loop = CeilDiv(embed, L0TileShape::N);
+        uint32_t mL1Loop = CeilDiv<L1TileShape::M>(rowNum);
+        uint32_t nL1Loop = CeilDiv<L0TileShape::N>(embed);
         uint32_t kL1Loop = CeilDiv(stackSeqTile, l1KDynamic);
         for (uint32_t nL1Idx = 0; nL1Idx < nL1Loop; nL1Idx++) {
             uint32_t nL1Actual = (nL1Idx == nL1Loop - 1) ? (embed - nL1Idx * L0TileShape::N) : L0TileShape::N;
@@ -176,7 +176,7 @@ public:
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(
                         l1APingPong); // 通知 GM -> L1 搬运完成，可以进行 L1 -> L0 搬运
 
-                    uint32_t kL0Loop = CeilDiv(kL1Actual, L0TileShape::K);
+                    uint32_t kL0Loop = CeilDiv<L0TileShape::K>(kL1Actual);
                     for (uint32_t kL0Idx = 0; kL0Idx < kL0Loop; kL0Idx++) {
                         uint32_t kL0Actual =
                             (kL0Idx == kL0Loop - 1) ? (kL1Actual - kL0Idx * L0TileShape::K) : L0TileShape::K;
@@ -209,7 +209,7 @@ public:
                         AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
 
                         // P @ V = OTmp
-                        uint32_t mL0Align = RoundUp(mL1Actual, NUM_16);
+                        uint32_t mL0Align = RoundUp<NUM_16>(mL1Actual);
                         tileMmad(
                             l0CTensor[l0CPingPong], l0ATensor[l0ABPingPong], l0BTensor[l0ABPingPong], mL0Align,
                             nL1Actual, kL0Actual, (kL1Idx == 0) && (kL0Idx == 0));

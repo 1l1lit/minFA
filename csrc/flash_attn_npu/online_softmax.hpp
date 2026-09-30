@@ -75,7 +75,7 @@ public:
 
     CATLASS_DEVICE void RowMax512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
-        uint32_t repeatTime = 512 * RoundUp(rowNum, FLT_PER_DATABLOCK) / FLT_PER_REPEAT;
+        uint32_t repeatTime = 512 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceMax<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
         PipeBarrier<PIPE_V>();
 
@@ -90,7 +90,7 @@ public:
 
     CATLASS_DEVICE void RowMax256(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
-        uint32_t repeatTime = 256 * RoundUp(rowNum, FLT_PER_DATABLOCK) / FLT_PER_REPEAT;
+        uint32_t repeatTime = 256 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceMax<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
         PipeBarrier<PIPE_V>();
 
@@ -99,7 +99,7 @@ public:
         BlockReduceMax<float, false>(tb, tv, repeatTime, 0, 1, 1, 4 /* srcRepStride */);
         PipeBarrier<PIPE_V>();
 
-        repeatTime = CeilDiv(repeatTime, FLT_PER_DATABLOCK);
+        repeatTime = CeilDiv<FLT_PER_DATABLOCK>(repeatTime);
         SetBlockReduceMaskLen(4);
         BlockReduceMax<float, false>(dst, tb, repeatTime, 0, 1, 1, 8);
         PipeBarrier<PIPE_V>();
@@ -114,14 +114,14 @@ public:
             BlockReduceMax<float, false>(tv, src, rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
             PipeBarrier<PIPE_V>();
 
-            BlockReduceMax<float, false>(dst, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+            BlockReduceMax<float, false>(dst, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
             PipeBarrier<PIPE_V>();
 
-            for (uint32_t idx = FLT_PER_REPEAT; idx < RoundDown(colNum, FLT_PER_REPEAT); idx += FLT_PER_REPEAT) {
+            for (uint32_t idx = FLT_PER_REPEAT; idx < RoundDown<FLT_PER_REPEAT>(colNum); idx += FLT_PER_REPEAT) {
                 BlockReduceMax<float, false>(tv, src[idx], rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
                 PipeBarrier<PIPE_V>();
 
-                BlockReduceMax<float, false>(tb, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+                BlockReduceMax<float, false>(tb, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
                 PipeBarrier<PIPE_V>();
 
                 SetVecMaskLen(rowNum);
@@ -134,15 +134,15 @@ public:
         if (colNum % FLT_PER_REPEAT > 0) {
             SetVecMaskLen(colNum % FLT_PER_REPEAT);
             BlockReduceMax<float, false>(
-                tv, src[RoundDown(colNum, FLT_PER_REPEAT)], rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
+                tv, src[RoundDown<FLT_PER_REPEAT>(colNum)], rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
             PipeBarrier<PIPE_V>();
 
-            SetBlockReduceMaskLen(CeilDiv(colNum % FLT_PER_REPEAT, FLT_PER_DATABLOCK));
+            SetBlockReduceMaskLen(CeilDiv<FLT_PER_DATABLOCK>(colNum % FLT_PER_REPEAT));
             if (colNum < FLT_PER_REPEAT) {
-                BlockReduceMax<float, false>(dst, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+                BlockReduceMax<float, false>(dst, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
                 PipeBarrier<PIPE_V>();
             } else {
-                BlockReduceMax<float, false>(tb, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+                BlockReduceMax<float, false>(tb, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
                 PipeBarrier<PIPE_V>();
 
                 SetVecMaskLen(rowNum);
@@ -168,7 +168,7 @@ public:
         uint32_t rowNum, uint32_t dmOffset, uint32_t rowOffset, uint32_t isFirstStackTile)
     {
         if (isFirstStackTile) {
-            DataCopy(hm[rowOffset], lm[rowOffset], DataCopyParams(1, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 0));
+            DataCopy(hm[rowOffset], lm[rowOffset], DataCopyParams(1, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 0));
             PipeBarrier<PIPE_V>();
         } else {
             SetVecMaskLen(rowNum);
@@ -187,13 +187,13 @@ public:
         }
 
         // gm = hm
-        DataCopy(gm[taskOffset][rowOffset], hm[rowOffset], DataCopyParams(1, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 0));
+        DataCopy(gm[taskOffset][rowOffset], hm[rowOffset], DataCopyParams(1, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 0));
         PipeBarrier<PIPE_V>();
     }
 
     CATLASS_DEVICE void RowSum512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
-        uint32_t repeatTime = 512 * RoundUp(rowNum, FLT_PER_DATABLOCK) / FLT_PER_REPEAT;
+        uint32_t repeatTime = 512 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceSum<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
         PipeBarrier<PIPE_V>();
 
@@ -208,7 +208,7 @@ public:
 
     CATLASS_DEVICE void RowSum256(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
-        uint32_t repeatTime = 256 * RoundUp(rowNum, FLT_PER_DATABLOCK) / FLT_PER_REPEAT;
+        uint32_t repeatTime = 256 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceSum<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
         PipeBarrier<PIPE_V>();
 
@@ -217,7 +217,7 @@ public:
         BlockReduceSum<float, false>(tb, tv, repeatTime, 0, 1, 1, 4);
         PipeBarrier<PIPE_V>();
 
-        repeatTime = CeilDiv(repeatTime, FLT_PER_DATABLOCK);
+        repeatTime = CeilDiv<FLT_PER_DATABLOCK>(repeatTime);
         SetBlockReduceMaskLen(4);
         BlockReduceSum<float, false>(dst, tb, repeatTime, 0, 1, 1, 8);
         PipeBarrier<PIPE_V>();
@@ -232,14 +232,14 @@ public:
             BlockReduceSum<float, false>(tv, src, rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
             PipeBarrier<PIPE_V>();
 
-            BlockReduceSum<float, false>(dst, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+            BlockReduceSum<float, false>(dst, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
             PipeBarrier<PIPE_V>();
 
-            for (uint32_t idx = FLT_PER_REPEAT; idx < RoundDown(colNum, FLT_PER_REPEAT); idx += FLT_PER_REPEAT) {
+            for (uint32_t idx = FLT_PER_REPEAT; idx < RoundDown<FLT_PER_REPEAT>(colNum); idx += FLT_PER_REPEAT) {
                 BlockReduceSum<float, false>(tv, src[idx], rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
                 PipeBarrier<PIPE_V>();
 
-                BlockReduceSum<float, false>(tb, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+                BlockReduceSum<float, false>(tb, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
                 PipeBarrier<PIPE_V>();
 
                 SetVecMaskLen(rowNum);
@@ -252,15 +252,15 @@ public:
         if (colNum % FLT_PER_REPEAT > 0) {
             SetVecMaskLen(colNum % FLT_PER_REPEAT);
             BlockReduceSum<float, false>(
-                tv, src[RoundDown(colNum, FLT_PER_REPEAT)], rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
+                tv, src[RoundDown<FLT_PER_REPEAT>(colNum)], rowNum, 0, 1, 1, colNumRound / FLT_PER_DATABLOCK);
             PipeBarrier<PIPE_V>();
 
-            SetBlockReduceMaskLen(CeilDiv(colNum % FLT_PER_REPEAT, FLT_PER_DATABLOCK));
+            SetBlockReduceMaskLen(CeilDiv<FLT_PER_DATABLOCK>(colNum % FLT_PER_REPEAT));
             if (colNum < FLT_PER_REPEAT) {
-                BlockReduceSum<float, false>(dst, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+                BlockReduceSum<float, false>(dst, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
                 PipeBarrier<PIPE_V>();
             } else {
-                BlockReduceSum<float, false>(tb, tv, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 1, 1, 8);
+                BlockReduceSum<float, false>(tb, tv, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 1, 1, 8);
                 PipeBarrier<PIPE_V>();
 
                 SetVecMaskLen(rowNum);
@@ -288,7 +288,7 @@ public:
         if (isFirstStackTile) {
             // gl = ll
             DataCopy(
-                gl[taskOffset][rowOffset], ll[rowOffset], DataCopyParams(1, CeilDiv(rowNum, FLT_PER_DATABLOCK), 0, 0));
+                gl[taskOffset][rowOffset], ll[rowOffset], DataCopyParams(1, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 0));
             PipeBarrier<PIPE_V>();
         } else {
             SetVecMaskLen(rowNum);
@@ -305,7 +305,7 @@ public:
     }
 
     CATLASS_DEVICE void CopyMaskToUb(
-        const GlobalTensor<ElementMask>& gMask, uint32_t rowNum, uint32_t colNumRound, uint32_t maskColRound,
+        const GlobalTensor<ElementMask>& gMask, uint32_t rowNum, uint32_t colNumRound, uint32_t maskColNum,
         uint32_t maskStride, uint32_t rowOffset, uint32_t qSBlockSize)
     {
         uint32_t qSIdxCurBlock = rowOffset % qSBlockSize;
@@ -313,53 +313,53 @@ public:
         while (rowsDone < rowNum) {
             uint32_t rowsCurHead = Min(rowNum - rowsDone, qSBlockSize - qSIdxCurBlock);
             DataCopy(
-                mask[rowsDone * maskColRound], gMask[qSIdxCurBlock * maskStride],
-                DataCopyParams(rowsCurHead, maskColRound / NUM_32, (maskStride - maskColRound) / NUM_32, 0));
+                mask[rowsDone * maskColNum], gMask[qSIdxCurBlock * maskStride],
+                DataCopyParams(rowsCurHead, maskColNum / NUM_32, (maskStride - maskColNum) / NUM_32, 0));
             rowsDone += rowsCurHead;
             qSIdxCurBlock = 0;
         }
     }
 
-    CATLASS_DEVICE void ApplyMask(uint32_t rowNum, uint32_t colNumRound, uint32_t maskColRound, uint32_t addMaskOffset)
+    CATLASS_DEVICE void ApplyMask(uint32_t rowNum, uint32_t colNumRound, uint32_t maskColNum, uint32_t applyMaskOffset)
     {
         Cast<half, ElementMask, false>(
-            mask16, mask, RoundMode::CAST_NONE, MASK_NUL, CeilDiv(rowNum * colNumRound, HALF_PER_REPEAT),
+            mask16, mask, RoundMode::CAST_NONE, MASK_NUL, CeilDiv<HALF_PER_REPEAT>(rowNum * colNumRound),
             UnaryRepeatParams(1, 1, 8, 4));
         PipeBarrier<PIPE_V>();
 
         Cast<float, half, false>(
-            mask32, mask16, RoundMode::CAST_NONE, MASK_NUL, CeilDiv(rowNum * colNumRound, FLT_PER_REPEAT),
+            mask32, mask16, RoundMode::CAST_NONE, MASK_NUL, CeilDiv<FLT_PER_REPEAT>(rowNum * colNumRound),
             UnaryRepeatParams(1, 1, 8, 4));
         PipeBarrier<PIPE_V>();
 
         Muls<float, false>(
-            mask32, mask32, -3e38f /* -FLT_MAX */, MASK_NUL, CeilDiv(rowNum * maskColRound, FLT_PER_REPEAT),
+            mask32, mask32, -3e38f /* -FLT_MAX */, MASK_NUL, CeilDiv<FLT_PER_REPEAT>(rowNum * maskColNum),
             UnaryRepeatParams());
         PipeBarrier<PIPE_V>();
 
-        if (maskColRound == colNumRound) {
+        if (maskColNum == colNumRound) {
             Add<float, false>(
-                ls[pingPongOffset], ls[pingPongOffset], mask32, MASK_NUL,
-                CeilDiv(rowNum * maskColRound, FLT_PER_REPEAT), BinaryRepeatParams());
+                ls[pingPongOffset], ls[pingPongOffset], mask32, MASK_NUL, CeilDiv<FLT_PER_REPEAT>(rowNum * maskColNum),
+                BinaryRepeatParams());
         } else {
-            for (uint32_t idx = 0; idx < RoundDown(maskColRound, FLT_PER_REPEAT); idx += FLT_PER_REPEAT) {
+            for (uint32_t idx = 0; idx < RoundDown<FLT_PER_REPEAT>(maskColNum); idx += FLT_PER_REPEAT) {
                 Add<float, false>(
-                    ls[pingPongOffset][addMaskOffset + idx], ls[pingPongOffset][addMaskOffset + idx], mask32[idx],
+                    ls[pingPongOffset][applyMaskOffset + idx], ls[pingPongOffset][applyMaskOffset + idx], mask32[idx],
                     MASK_NUL, rowNum,
                     BinaryRepeatParams(
                         1, 1, 1, colNumRound / FLT_PER_DATABLOCK, colNumRound / FLT_PER_DATABLOCK,
-                        maskColRound / FLT_PER_DATABLOCK));
+                        maskColNum / FLT_PER_DATABLOCK));
             }
 
-            if (maskColRound % FLT_PER_REPEAT > 0) {
-                SetVecMaskLen(maskColRound % FLT_PER_REPEAT);
+            if (maskColNum % FLT_PER_REPEAT > 0) {
+                SetVecMaskLen(maskColNum % FLT_PER_REPEAT);
                 Add<float, false>(
-                    ls[pingPongOffset][addMaskOffset + RoundDown(maskColRound, FLT_PER_REPEAT)],
-                    ls[pingPongOffset][addMaskOffset + RoundDown(maskColRound, FLT_PER_REPEAT)],
-                    mask32[RoundDown(maskColRound, FLT_PER_REPEAT)], MASK_NUL, rowNum,
+                    ls[pingPongOffset][applyMaskOffset + RoundDown<FLT_PER_REPEAT>(maskColNum)],
+                    ls[pingPongOffset][applyMaskOffset + RoundDown<FLT_PER_REPEAT>(maskColNum)],
+                    mask32[RoundDown<FLT_PER_REPEAT>(maskColNum)], MASK_NUL, rowNum,
                     BinaryRepeatParams(
                         1, 1, 1, colNumRound / FLT_PER_DATABLOCK, colNumRound / FLT_PER_DATABLOCK,
-                        maskColRound / FLT_PER_DATABLOCK));
+                        maskColNum / FLT_PER_DATABLOCK));
                 ResetMask();
             }
         }
@@ -369,11 +369,11 @@ public:
     CATLASS_DEVICE void CalcExp(uint32_t rowNum, uint32_t colNum, uint32_t colNumRound, uint32_t rowOffset)
     {
         // hm_block = expand_to_block(hm), 存放于 tv
-        Brcb(tv, hm[rowOffset], CeilDiv(rowNum, FLT_PER_DATABLOCK), BrcbRepeatParams());
+        Brcb(tv, hm[rowOffset], CeilDiv<FLT_PER_DATABLOCK>(rowNum), BrcbRepeatParams());
         PipeBarrier<PIPE_V>();
 
         // ls = ls - hm_block
-        for (uint32_t idx = 0; idx < RoundDown(colNum, FLT_PER_REPEAT); idx += FLT_PER_REPEAT) {
+        for (uint32_t idx = 0; idx < RoundDown<FLT_PER_REPEAT>(colNum); idx += FLT_PER_REPEAT) {
             Sub<float, false>(
                 ls[pingPongOffset][idx], ls[pingPongOffset][idx], tv, MASK_NUL, rowNum,
                 BinaryRepeatParams(1, 1, 0, colNumRound / FLT_PER_DATABLOCK, colNumRound / FLT_PER_DATABLOCK, 1));
@@ -382,8 +382,8 @@ public:
         if (colNum % FLT_PER_REPEAT > 0) {
             SetVecMaskLen(colNum % FLT_PER_REPEAT);
             Sub<float, false>(
-                ls[pingPongOffset][RoundDown(colNum, FLT_PER_REPEAT)],
-                ls[pingPongOffset][RoundDown(colNum, FLT_PER_REPEAT)], tv, MASK_NUL, rowNum,
+                ls[pingPongOffset][RoundDown<FLT_PER_REPEAT>(colNum)],
+                ls[pingPongOffset][RoundDown<FLT_PER_REPEAT>(colNum)], tv, MASK_NUL, rowNum,
                 BinaryRepeatParams(1, 1, 0, colNumRound / FLT_PER_DATABLOCK, colNumRound / FLT_PER_DATABLOCK, 1));
             ResetMask();
         }
@@ -391,7 +391,7 @@ public:
 
         // ls = exp(ls)
         Exp<float, false>(
-            ls[pingPongOffset], ls[pingPongOffset], MASK_NUL, CeilDiv(rowNum * colNumRound, FLT_PER_REPEAT),
+            ls[pingPongOffset], ls[pingPongOffset], MASK_NUL, CeilDiv<FLT_PER_REPEAT>(rowNum * colNumRound),
             UnaryRepeatParams());
         PipeBarrier<PIPE_V>();
     }
@@ -399,7 +399,7 @@ public:
     CATLASS_DEVICE void ScaleS(uint32_t rowNum, uint32_t colNumRound)
     {
         Muls<float, false>(
-            ls[pingPongOffset], ls[pingPongOffset], scaleVal, MASK_NUL, CeilDiv(rowNum * colNumRound, FLT_PER_REPEAT),
+            ls[pingPongOffset], ls[pingPongOffset], scaleVal, MASK_NUL, CeilDiv<FLT_PER_REPEAT>(rowNum * colNumRound),
             UnaryRepeatParams());
         PipeBarrier<PIPE_V>();
     }
@@ -426,7 +426,7 @@ public:
         RoundMode roundMode = std::is_same_v<ElementOutput, bfloat16_t> ? RoundMode::CAST_RINT : RoundMode::CAST_NONE;
         WaitFlag<HardEvent::MTE3_V>(pingPong);
         Cast<ElementOutput, float, false>(
-            lp[pingPongOffset], ls[pingPongOffset], roundMode, MASK_NUL, CeilDiv(rowNum * colNumRound, FLT_PER_REPEAT),
+            lp[pingPongOffset], ls[pingPongOffset], roundMode, MASK_NUL, CeilDiv<FLT_PER_REPEAT>(rowNum * colNumRound),
             UnaryRepeatParams(1, 1, 4, 8));
         SetFlag<HardEvent::V_MTE3>(pingPong);
 
@@ -450,7 +450,7 @@ public:
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t colNum = actualBlockShape.n();
-        uint32_t colNumRound = RoundUp(colNum, NUM_32);
+        uint32_t colNumRound = RoundUp<NUM_32>(colNum);
         uint32_t colStride = layoutInput.stride(0);
 
         uint32_t coreIdx = GetSubBlockIdx();
@@ -462,7 +462,7 @@ public:
             return;
         }
 
-        uint32_t rowNumTile = RoundDown(MAX_UB_ELEM_NUM / colNumRound, FLT_PER_DATABLOCK);
+        uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / colNumRound);
         rowNumTile = Min(rowNumTile, FLT_PER_REPEAT);
         uint32_t rowLoop = CeilDiv(coreRowActual, rowNumTile);
 
@@ -510,7 +510,7 @@ public:
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t colNum = actualBlockShape.n();
-        uint32_t colNumRound = RoundUp(colNum, NUM_32);
+        uint32_t colNumRound = RoundUp<NUM_32>(colNum);
         uint32_t colStride = layoutInput.stride(0);
         uint32_t maskStride = layoutMask.stride(0);
 
@@ -524,34 +524,33 @@ public:
             return;
         }
 
-        uint32_t rowNumTile = RoundDown(MAX_UB_ELEM_NUM / colNumRound, FLT_PER_DATABLOCK);
+        uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / colNumRound);
         rowNumTile = Min(rowNumTile, FLT_PER_REPEAT);
         uint32_t rowLoop = CeilDiv(coreRowActual, rowNumTile);
 
         // calc mask offset
         uint32_t gmMaskRow;
         uint32_t gmMaskCol;
-        uint32_t maskCol;
-        uint32_t addMaskOffset;
-        if (triUp >= kvSStartIdx) {
-            uint32_t triUpRound = RoundDown(triUp, NUM_32);
-            gmMaskRow = triUp - triUpRound + ((qNBlockSize == 1) ? coreRowOffset : 0);
-            gmMaskCol = 0;
-            maskCol = kvSEndIdx - triUpRound;
-            addMaskOffset = triUpRound - kvSStartIdx;
-        } else {
+        uint32_t maskColNum;
+        uint32_t applyMaskOffset;
+        if (triUp < kvSStartIdx) { // Q 分块首行全量掩码
             gmMaskRow = (qNBlockSize == 1) ? coreRowOffset : 0;
             gmMaskCol = kvSStartIdx - triUp;
-            maskCol = colNum;
-            addMaskOffset = 0;
+            maskColNum = colNumRound;
+            applyMaskOffset = 0;
+        } else { // Q 分块首行部分掩码
+            uint32_t triUpRound = RoundDown<NUM_32>(triUp);
+            gmMaskRow = (triUp - triUpRound) + ((qNBlockSize == 1) ? coreRowOffset : 0);
+            gmMaskCol = 0;
+            maskColNum = RoundUp<NUM_32>(kvSEndIdx) - triUpRound;
+            applyMaskOffset = triUpRound - kvSStartIdx;
         }
-        uint32_t maskColRound = RoundUp(maskCol, NUM_32);
 
         // load mask before cross core sync
         WaitFlag<HardEvent::V_MTE2>(EVENT_ID2);
         CopyMaskToUb(
             gMask[layoutMask.GetOffset(MatrixCoord(gmMaskRow, gmMaskCol))], Min(rowNumTile, coreRowActual), colNumRound,
-            maskColRound, maskStride, 0, qSBlockSize);
+            maskColNum, maskStride, 0, qSBlockSize);
         SetFlag<HardEvent::MTE2_V>(EVENT_ID2);
         Arch::CrossCoreWaitFlag(qkReady);
 
@@ -582,14 +581,14 @@ public:
                 ScaleS(rowNumNowLoop, colNumRound);
 
                 WaitFlag<HardEvent::MTE2_V>(EVENT_ID2);
-                ApplyMask(rowNumNowLoop, colNumRound, maskColRound, addMaskOffset);
+                ApplyMask(rowNumNowLoop, colNumRound, maskColNum, applyMaskOffset);
                 SetFlag<HardEvent::V_MTE2>(EVENT_ID2);
 
                 if (rowIdx < rowLoop) {
                     WaitFlag<HardEvent::V_MTE2>(EVENT_ID2);
                     CopyMaskToUb(
                         gMask[layoutMask.GetOffset(MatrixCoord(gmMaskRow, gmMaskCol))], rowNumCurLoop, colNumRound,
-                        maskColRound, maskStride, rowOffset, qSBlockSize);
+                        maskColNum, maskStride, rowOffset, qSBlockSize);
                     SetFlag<HardEvent::MTE2_V>(EVENT_ID2);
                 }
 

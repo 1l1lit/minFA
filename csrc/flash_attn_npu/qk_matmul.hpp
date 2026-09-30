@@ -100,8 +100,7 @@ public:
         uint32_t embed = layoutA.shape(1);
 
         // Q: GM -> L1
-        using L1AAlignHelper = Gemm::helper::L1AlignHelper<ElementA, LayoutA>;
-        uint32_t rowNumRound = RoundUp(rowNum, L1AAlignHelper::M_ALIGNED);
+        uint32_t rowNumRound = RoundUp<NUM_16>(rowNum);
         auto layoutASingleNd = layoutA.GetTileLayout(MakeCoord(qNBlockSize, embed));
         LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(rowNum, embed);
 
@@ -136,9 +135,9 @@ public:
         }
 
         uint32_t curBlockIdx = 0;
-        uint32_t mL0Loop = CeilDiv(rowNum, L0TileShape::M);
+        uint32_t mL0Loop = CeilDiv<L0TileShape::M>(rowNum);
         uint32_t nL1Loop = CeilDiv(stackSeqTile, l1NDynamic);
-        uint32_t kL0Loop = CeilDiv(embed, L0TileShape::K);
+        uint32_t kL0Loop = CeilDiv<L0TileShape::K>(embed);
         for (uint32_t nL1Idx = 0; nL1Idx < nL1Loop; nL1Idx++) {
             uint32_t nActual = (nL1Idx == nL1Loop - 1) ? (stackSeqTile - nL1Idx * l1NDynamic) : l1NDynamic;
             LayoutBInL1 layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(embed, nActual);
@@ -223,7 +222,7 @@ public:
                     AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
 
                     // Q @ K = S
-                    uint32_t mL0Align = RoundUp(mL0Actual, NUM_16);
+                    uint32_t mL0Align = RoundUp<NUM_16>(mL0Actual);
                     tileMmad(
                         l0CTensor[l0CPingPong],  // l0CTensor
                         l0ATensor[l0ABPingPong], // l0ATensor

@@ -130,7 +130,7 @@ public:
         }
 
         if ASCEND_IS_AIC {
-            uint32_t kDynNum = RoundUp(embed, NUM_128);                           // K 对应 D 维度
+            uint32_t kDynNum = RoundUp<NUM_128>(embed);                           // K 对应 D 维度
             uint32_t nDynNum = NUM_128;                                           // N 对应 KV 的序列长度
             uint32_t kPVDynNum = nDynNum * kDynNum / BlockMmadPV::L1TileShape::M; // P 复用 K 的 L1 空间
             uint32_t maxQL1Size = kDynNum * Q_TILE_CEIL * sizeof(ElementQ);       // Q 的预留 L1 空间
@@ -146,7 +146,7 @@ public:
         uint32_t strideK = kvHeads * embed;
         uint32_t strideV = kvHeads * embed;
         uint32_t strideO = qHeads * embed;
-        uint32_t embedRound = RoundUp(embed, NUM_16);
+        uint32_t embedRound = RoundUp<NUM_16>(embed);
         uint32_t groupSize = qHeads / kvHeads;
         uint32_t stackSeqTile = MAX_KV_STACK_LEN;
 
@@ -175,7 +175,7 @@ public:
 
         struct TaskInfo {
             uint32_t kvSIdx, kvSLoop;
-            uint32_t qSeqlen, kvSeqlen, noSkipKvS;
+            uint32_t qSeqlen, kvSeqlen, triUp, noSkipKvS;
             uint64_t gmOffsetQ, gmOffsetK, gmOffsetV, gmOffsetO, gmOffsetLse, gmOffsetBlock;
             uint32_t qSBlockSize, qNBlockSize, rowNum;
         };
@@ -198,6 +198,7 @@ public:
             uint32_t& kvSLoop = curTask.kvSLoop;
             uint32_t& qSeqlen = curTask.qSeqlen;
             uint32_t& kvSeqlen = curTask.kvSeqlen;
+            uint32_t& triUp = curTask.triUp;
             uint32_t& noSkipKvS = curTask.noSkipKvS;
             uint64_t& gmOffsetQ = curTask.gmOffsetQ;
             uint64_t& gmOffsetK = curTask.gmOffsetK;
@@ -239,10 +240,10 @@ public:
                         kvSeqlen = gActualKvseqlen.GetValue(curBatch + 1) - gActualKvseqlen.GetValue(curBatch);
                     }
                 }
-                curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);     // Q 的 N 维分块大小
+                curQNBlockTile = Min(groupSize, N_SPLIT_HELPER);         // Q 的 N 维分块大小
                 qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile); // 每个 group 的 N 维分块数量，向上取整
                 curQNBlockNum = qNBlockNumPerGroup * kvHeads;            // Q 的 N 维分块数量
-                curQSBlockTile = GetQSBlockTile();                       // Q 的 S 维分块大小
+                curQSBlockTile = Q_TILE_CEIL / curQNBlockTile;           // Q 的 S 维分块大小
                 curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);        // Q 的 S 维分块数量，向上取整
                 curTotalTaskNum += curQNBlockNum * curQSBlockNum;        // 新增当前 batch 的 Q 任务数量
                 curBatch++;
@@ -281,16 +282,19 @@ public:
                 qNBlockSize = (qNBlockIdxCurGroup == qNBlockNumPerGroup - 1)
                                   ? (groupSize - qNBlockIdxCurGroup * curQNBlockTile)
                                   : curQNBlockTile;
-                rowNum = qSBlockSize * qNBlockSize; // curTask 的 Q 行数
+                rowNum = qSBlockSize * qNBlockSize; // task 的 Q 行数
 
-                noSkipKvS = kvSeqlen;                      // curTask 计算的 KV 序列长度
-                if (MASK_TYPE_ == MaskType::MASK_CAUSAL) { // 因果掩码，Q 只能看到之前的 KV
+                if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
                     int32_t seqDiff = static_cast<int32_t>(kvSeqlen) - static_cast<int32_t>(qSeqlen);
-                    int32_t qSEndIdx = (qSBlockIdx + 1) * curQSBlockTile; // 当前分块最后一个 Q 的 S 维索引
-                    noSkipKvS = Max(qSEndIdx + seqDiff, 0);
-                    noSkipKvS = Min(kvSeqlen, noSkipKvS); // 不超过实际的 KV 序列长度
+                    int32_t qSStartIdx = qSBlockIdx * curQSBlockTile; // Q 分块的开始下标（闭区间）
+                    triUp = Max(qSStartIdx + seqDiff, 0);             // Q 分块首行允许访问的最大 KV 下标
+                    int32_t qSEndIdx = qSStartIdx + qSBlockSize;      // Q 分块的结束下标（开区间）
+                    noSkipKvS = Max(qSEndIdx + seqDiff, 0);           // task 计算的 KV 序列长度
+                    noSkipKvS = Min(kvSeqlen, noSkipKvS);             // 不超过实际的 KV 序列长度
+                } else {
+                    noSkipKvS = kvSeqlen; // task 计算的 KV 序列长度
                 }
-                kvSLoop = CeilDiv(noSkipKvS, MAX_KV_STACK_LEN); // curTask 的 KV 循环分块数目
+                kvSLoop = CeilDiv<MAX_KV_STACK_LEN>(noSkipKvS); // task 的 KV 循环分块数目
 
                 if ASCEND_IS_AIC {
                     layoutQTmp = LayoutQ(rowNum, embed);             // (S * N, D)
@@ -326,22 +330,21 @@ public:
                         LayoutMask layoutMask(MAX_KV_STACK_LEN, MAX_KV_STACK_LEN);
                         uint64_t gmOffsetP = gmOffsetS;
                         epilogueOnlineSoftmax.set_curTaskMod(curTaskMod);
+
+                        bool applyMask = false;
                         if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
-                            uint32_t triUp = (noSkipKvS > qSBlockSize) ? (noSkipKvS - qSBlockSize) : 0;
-                            uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN;
-                            uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;
-                            if (triUp < kvSEndIdx - 1) { // KV 分块内需要掩码
+                            uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN; // KV 分块的起始下标（闭区间）
+                            uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;  // KV 分块的结束下标（开区间）
+                            applyMask = (triUp < kvSEndIdx - 1); // Q 分块首行允许访问的最大 KV 下标 < KV 分块的结束下标
+                            if (applyMask) {
                                 epilogueOnlineSoftmax(
                                     gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask,
                                     actualBlockShapeQK, (kvSIdx == 0), qSBlockSize, qNBlockSize, curStackTileMod,
                                     qkReady, triUp, kvSStartIdx, kvSEndIdx);
-                            } else { // KV 分块内无需掩码
-                                Arch::CrossCoreWaitFlag(qkReady);
-                                epilogueOnlineSoftmax(
-                                    gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0),
-                                    qSBlockSize, qNBlockSize, curStackTileMod);
                             }
-                        } else {
+                        }
+
+                        if (!applyMask) {
                             Arch::CrossCoreWaitFlag(qkReady);
                             epilogueOnlineSoftmax(
                                 gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0),
