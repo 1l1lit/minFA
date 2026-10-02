@@ -240,10 +240,10 @@ public:
                         kvSeqlen = gActualKvseqlen.GetValue(curBatch + 1) - gActualKvseqlen.GetValue(curBatch);
                     }
                 }
-                curQNBlockTile = Min(groupSize, N_SPLIT_HELPER);         // Q 的 N 维分块大小
+                curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);     // Q 的 N 维分块大小
                 qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile); // 每个 group 的 N 维分块数量，向上取整
                 curQNBlockNum = qNBlockNumPerGroup * kvHeads;            // Q 的 N 维分块数量
-                curQSBlockTile = Q_TILE_CEIL / curQNBlockTile;           // Q 的 S 维分块大小
+                curQSBlockTile = GetQSBlockTile();                       // Q 的 S 维分块大小
                 curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);        // Q 的 S 维分块数量，向上取整
                 curTotalTaskNum += curQNBlockNum * curQSBlockNum;        // 新增当前 batch 的 Q 任务数量
                 curBatch++;

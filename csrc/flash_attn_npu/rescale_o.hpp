@@ -87,7 +87,7 @@ public:
         const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
         const LayoutInput& layoutInput, uint32_t inRowActual, uint32_t isFirstStackTile, uint32_t isLastStackTile,
         uint32_t curStackTileMod, uint32_t multipleRowLoop, uint32_t isLastRowLoop, uint32_t rowOffset,
-        uint32_t qSBlockSize, uint32_t strideO)
+        uint32_t qSBlockSize, uint32_t coreHeadNum, uint32_t strideLSE, uint32_t strideO)
     {
         uint32_t rowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -172,7 +172,26 @@ public:
                     BinaryRepeatParams());
                 SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
                 WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
-                DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, inRowActual * sizeof(float), 0, 0, 0));
+                if (coreHeadNum <= 1) {
+                    DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, inRowActual * sizeof(float), 0, 0, 0));
+                } else {
+                    if (qSBlockSize % FLT_PER_DATABLOCK > 0) {
+                        DataCopyPad(
+                            gUpdate, lse[taskOffset], DataCopyExtParams(1, inRowActual * sizeof(float), 0, 0, 0));
+                        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+                        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+                        DataCopyPad(
+                            lse[taskOffset], gUpdate,
+                            DataCopyExtParams(coreHeadNum, qSBlockSize * sizeof(float), 0, 0, 0),
+                            DataCopyPadExtParams<ElementLse>());
+                        SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
+                        WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
+                    }
+                    DataCopyPad(
+                        gLse, lse[taskOffset],
+                        DataCopyExtParams(
+                            coreHeadNum, qSBlockSize * sizeof(float), 0, (strideLSE - qSBlockSize) * sizeof(float), 0));
+                }
                 SetFlag<HardEvent::MTE3_V>(taskEvent); // 通知当前 task 已释放临时空间
             }
 
@@ -206,10 +225,13 @@ public:
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
         uint32_t strideO = layoutOutput.stride(0);
+        uint32_t strideLSE = layoutLse.stride(0);
         uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / embed);
 
         uint32_t coreIdx = GetSubBlockIdx();
-        uint32_t inRowSplit = (qNBlockSize == 1) ? (qSBlockSize / 2) : (qSBlockSize * (qNBlockSize / 2));
+        uint32_t qNSplit = qNBlockSize / 2;
+        uint32_t inRowSplit = (qNBlockSize == 1) ? (qSBlockSize / 2) : (qSBlockSize * qNSplit);
+        uint32_t coreHeadNum = (coreIdx == 1) ? (qNBlockSize - qNSplit) : qNSplit;
         uint32_t inRowActual = (coreIdx == 1) ? (rowNum - inRowSplit) : inRowSplit;
         uint32_t inRowOffset = coreIdx * inRowSplit;
 
@@ -219,8 +241,8 @@ public:
 
         uint32_t rowLoop = CeilDiv(inRowActual, rowNumTile);
         uint32_t outRowOffset = (qNBlockSize == 1) ? inRowOffset : 0;
-        uint32_t outColOffset = (qNBlockSize == 1) ? 0 : coreIdx * (qNBlockSize / 2) * embed;
-        uint32_t lseRowOffset = (qNBlockSize == 1) ? 0 : coreIdx * (qNBlockSize / 2);
+        uint32_t outColOffset = (qNBlockSize == 1) ? 0 : (coreIdx * qNSplit * embed);
+        uint32_t lseRowOffset = (qNBlockSize == 1) ? 0 : (coreIdx * qNSplit);
         uint32_t lseColOffset = (qNBlockSize == 1) ? inRowOffset : 0;
 
         for (uint32_t rowIdx = 0; rowIdx < rowLoop; rowIdx++) {
@@ -235,7 +257,7 @@ public:
                 gLse[layoutLse.GetOffset(MatrixCoord(lseRowOffset, lseColOffset))],
                 layoutInput.GetTileLayout(MatrixCoord(rowNumCurLoop, embed)), inRowActual, isFirstStackTile,
                 isLastStackTile, curStackTileMod, (rowLoop > 1), (rowIdx == rowLoop - 1), rowOffset, qSBlockSize,
-                strideO);
+                coreHeadNum, strideLSE, strideO);
         }
     }
 
