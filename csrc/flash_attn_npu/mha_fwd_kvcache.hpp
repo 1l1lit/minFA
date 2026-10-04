@@ -129,6 +129,14 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
         }
 
+        uint32_t strideQ = qHeads * embed;
+        uint32_t strideK = kvHeads * embed;
+        uint32_t strideV = kvHeads * embed;
+        uint32_t strideO = qHeads * embed;
+        uint32_t embedRound = RoundUp<NUM_16>(embed);
+        uint32_t groupSize = qHeads / kvHeads;
+        uint32_t stackSeqTile = MAX_KV_STACK_LEN;
+
         if ASCEND_IS_AIC {
             uint32_t kDynNum = RoundUp<NUM_128>(embed);                           // K 对应 D 维度
             uint32_t nDynNum = NUM_128;                                           // N 对应 KV 的序列长度
@@ -137,18 +145,15 @@ public:
 
             blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN);
             blockMmadPV.init(resource, kPVDynNum, MAX_KV_STACK_LEN, maxQL1Size);
+
+            layoutKTmp = LayoutK(strideK, MAX_KV_STACK_LEN);
+            layoutVTmp = LayoutV(MAX_KV_STACK_LEN, strideV);
         } else { // ASCEND_IS_AIV
             epilogueOnlineSoftmax.init(resource, scaleValue);
             epilogueRescaleO.init(resource);
-        }
 
-        uint32_t strideQ = qHeads * embed;
-        uint32_t strideK = kvHeads * embed;
-        uint32_t strideV = kvHeads * embed;
-        uint32_t strideO = qHeads * embed;
-        uint32_t embedRound = RoundUp<NUM_16>(embed);
-        uint32_t groupSize = qHeads / kvHeads;
-        uint32_t stackSeqTile = MAX_KV_STACK_LEN;
+            layoutMask = LayoutMask(MAX_KV_STACK_LEN, 2 * MAX_KV_STACK_LEN);
+        }
 
         uint64_t qBOffset = 0;
         uint64_t kBOffset = 0;
@@ -297,9 +302,7 @@ public:
                 kvSLoop = CeilDiv<MAX_KV_STACK_LEN>(noSkipKvS); // task 的 KV 循环分块数目
 
                 if ASCEND_IS_AIC {
-                    layoutQTmp = LayoutQ(rowNum, embed);             // (S * N, D)
-                    layoutKTmp = LayoutK(strideK, MAX_KV_STACK_LEN); // (N * D, S)
-                    layoutVTmp = LayoutV(MAX_KV_STACK_LEN, strideV); // (S, N * D)
+                    layoutQTmp = LayoutQ(rowNum, embed);
                     blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTmp, qSBlockSize, qNBlockSize, strideQ);
                 }
             } else {
@@ -326,8 +329,7 @@ public:
                             actualBlockShapeQK, kvSIdx, pagedBlockSize, strideK, (kvSIdx == kvSLoop - 1));
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
-                        LayoutP layoutP(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
-                        LayoutMask layoutMask(MAX_KV_STACK_LEN, MAX_KV_STACK_LEN);
+                        LayoutP layoutP = layoutS;
                         uint64_t gmOffsetP = gmOffsetS;
                         epilogueOnlineSoftmax.set_curTaskMod(curTaskMod);
 
@@ -376,8 +378,8 @@ public:
                     } else {
                         stackSeqTile = MAX_KV_STACK_LEN;
                     }
-                    uint32_t curStackTileMod = (loopNum - PRE_LAUNCH) % DOUBLE_BUFFER;
-                    uint64_t gmOffsetOTmp = (coreIdx * DOUBLE_BUFFER + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
+                    uint32_t nowStackTileMod = (loopNum - PRE_LAUNCH) % DOUBLE_BUFFER;
+                    uint64_t gmOffsetOTmp = (coreIdx * DOUBLE_BUFFER + nowStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
                     GemmCoord actualBlockShapePV{rowNum, embed, stackSeqTile};
                     LayoutOTmp layoutOTmp(rowNum, embed, embedRound);
 
@@ -391,8 +393,8 @@ public:
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(pvReady);
                     } else { // ASCEND_IS_AIV
                         LayoutO layoutO(qSeqlen, strideO);
-                        LayoutUpdate layoutUpdate(rowNum, embed, embedRound);
                         LayoutLse layoutLse(qHeads, strideLse);
+                        LayoutUpdate layoutUpdate = layoutOTmp;
                         uint64_t gmOffsetUpdate = coreIdx * WORKSPACE_BLOCK_SIZE_DB;
                         epilogueRescaleO.set_curTaskMod(nowTaskMod);
 
@@ -400,7 +402,7 @@ public:
                         epilogueRescaleO(
                             gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse], layoutO,
                             layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, qSBlockSize, qNBlockSize,
-                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), curStackTileMod);
+                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), nowStackTileMod);
                     }
                 }
             }
@@ -442,6 +444,7 @@ private:
     LayoutQ layoutQTmp;
     LayoutK layoutKTmp;
     LayoutV layoutVTmp;
+    LayoutMask layoutMask;
 
     Arch::CrossCoreFlag qkReady{QK_READY_ID};
     Arch::CrossCoreFlag softmaxReady{SOFTMAX_READY_ID};
