@@ -63,31 +63,101 @@ public:
     }
 
     CATLASS_DEVICE void CopyOToGm(
-        const GlobalTensor<ElementOutput>& gOutput, uint32_t rowNum, uint32_t rowOffset, uint32_t qSBlockSize,
-        uint32_t embed, uint32_t embedRound, uint32_t strideO)
+        const GlobalTensor<ElementOutput>& gOutput, uint32_t rowNum, uint32_t rowOffset, uint32_t qSOffset,
+        uint32_t qSBlockSize, uint32_t embed, uint32_t embedRound, uint32_t strideO)
     {
-        uint32_t qSIdxCurBlock = rowOffset % qSBlockSize;
-        uint32_t qSOffset = qSIdxCurBlock * strideO;
-        uint32_t qNOffset = (rowOffset / qSBlockSize) * embed;
+        uint32_t qSBlockIdx = (qSOffset + rowOffset) % qSBlockSize;
+        uint32_t qNBlockIdx = (qSOffset + rowOffset) / qSBlockSize;
         uint32_t rowsDone = 0;
         while (rowsDone < rowNum) {
-            uint32_t rowsCurHead = Min(rowNum - rowsDone, qSBlockSize - qSIdxCurBlock);
+            uint32_t rowsCurHead = Min(rowNum - rowsDone, qSBlockSize - qSBlockIdx);
             DataCopyPad(
-                gOutput[qSOffset + qNOffset], go16[rowsDone * embedRound],
+                gOutput[qSBlockIdx * strideO + qNBlockIdx * embed], go16[rowsDone * embedRound],
                 DataCopyExtParams(
                     rowsCurHead, embed * sizeof(ElementOutput), 0, (strideO - embed) * sizeof(ElementOutput), 0));
             rowsDone += rowsCurHead;
-            qNOffset += embed;
-            qSIdxCurBlock = 0;
+            qSBlockIdx = 0;
+            qNBlockIdx++;
+        }
+    }
+
+    CATLASS_DEVICE void CopyLseToGm(
+        const GlobalTensor<ElementLse>& gLse, const GlobalTensor<ElementUpdate>& gUpdate, uint32_t rowNum,
+        uint32_t headNum, uint32_t qSOffset, uint32_t qSBlockSize, uint32_t strideLse)
+    {
+        if (headNum == 1) {
+            DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, rowNum * sizeof(float), 0, 0, 0));
+            return;
+        }
+
+        // *** PreToken ***
+        uint32_t preTokenNum = 0;
+        uint32_t gmOffset = 0;
+        uint32_t ubOffset = 0;
+        uint32_t gmAlign = 0;
+        if (qSOffset > 0) {
+            preTokenNum = qSBlockSize - qSOffset;
+            DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, preTokenNum * sizeof(float), 0, 0, 0));
+            headNum--;
+
+            gmOffset = strideLse - qSOffset;
+            ubOffset = RoundDown<FLT_PER_DATABLOCK>(preTokenNum);
+            gmAlign = preTokenNum - ubOffset;
+        }
+
+        // *** Align ***
+        uint32_t epiTokenNum = (rowNum - preTokenNum) % qSBlockSize;
+        headNum = epiTokenNum ? (headNum - 1) : headNum;
+        bool preTokenNotAlign = (gmAlign > 0);
+        bool qSBlockSizeNotAlign = (qSBlockSize % FLT_PER_DATABLOCK > 0);
+        if (preTokenNotAlign || qSBlockSizeNotAlign) {
+            // ** UB -> GM **
+            DataCopyPad(
+                gUpdate, lse[taskOffset][ubOffset], DataCopyExtParams(1, (rowNum - ubOffset) * sizeof(float), 0, 0, 0));
+            SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+            // ** GM -> UB **
+            if (qSBlockSizeNotAlign) {
+                DataCopyPad(
+                    lse[taskOffset][ubOffset], gUpdate[gmAlign],
+                    DataCopyExtParams(headNum, qSBlockSize * sizeof(float), 0, 0, 0),
+                    DataCopyPadExtParams<ElementLse>());
+                if (epiTokenNum) {
+                    DataCopyPad(
+                        lse[taskOffset][ubOffset + headNum * RoundUp<FLT_PER_DATABLOCK>(qSBlockSize)],
+                        gUpdate[gmAlign + headNum * qSBlockSize],
+                        DataCopyExtParams(1, epiTokenNum * sizeof(float), 0, 0, 0), DataCopyPadExtParams<ElementLse>());
+                }
+            } else {
+                DataCopyPad(
+                    lse[taskOffset][ubOffset], gUpdate[gmAlign],
+                    DataCopyExtParams(1, (rowNum - preTokenNum) * sizeof(float), 0, 0, 0),
+                    DataCopyPadExtParams<ElementLse>());
+            }
+            SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
+        }
+
+        // *** IntegralHead ***
+        DataCopyPad(
+            gLse[gmOffset], lse[taskOffset][ubOffset],
+            DataCopyExtParams(headNum, qSBlockSize * sizeof(float), 0, (strideLse - qSBlockSize) * sizeof(float), 0));
+
+        // *** EpiToken ***
+        if (epiTokenNum) {
+            DataCopyPad(
+                gLse[gmOffset + headNum * strideLse],
+                lse[taskOffset][ubOffset + headNum * RoundUp<FLT_PER_DATABLOCK>(qSBlockSize)],
+                DataCopyExtParams(1, epiTokenNum * sizeof(float), 0, 0, 0));
         }
     }
 
     CATLASS_DEVICE void SubCoreCompute(
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
-        const LayoutInput& layoutInput, uint32_t inRowActual, uint32_t isFirstStackTile, uint32_t isLastStackTile,
+        const LayoutInput& layoutInput, uint32_t coreRow, uint32_t isFirstStackTile, uint32_t isLastStackTile,
         uint32_t curStackTileMod, uint32_t multipleRowLoop, uint32_t isLastRowLoop, uint32_t rowOffset,
-        uint32_t qSBlockSize, uint32_t coreHeadNum, uint32_t strideLSE, uint32_t strideO)
+        uint32_t qSBlockSize, uint32_t qSOffset, uint32_t coreHeadNum, uint32_t strideLse, uint32_t strideO)
     {
         uint32_t rowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -164,34 +234,14 @@ public:
             // move lse to GM
             if (isLastRowLoop) {
                 Ln<float, false>(
-                    lse[taskOffset], gl[taskOffset], MASK_NUL, CeilDiv<FLT_PER_REPEAT>(inRowActual),
-                    UnaryRepeatParams());
+                    lse[taskOffset], gl[taskOffset], MASK_NUL, CeilDiv<FLT_PER_REPEAT>(coreRow), UnaryRepeatParams());
                 PipeBarrier<PIPE_V>();
                 Add<float, false>(
-                    lse[taskOffset], lse[taskOffset], gm[taskOffset], MASK_NUL, CeilDiv<FLT_PER_REPEAT>(inRowActual),
+                    lse[taskOffset], lse[taskOffset], gm[taskOffset], MASK_NUL, CeilDiv<FLT_PER_REPEAT>(coreRow),
                     BinaryRepeatParams());
                 SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
                 WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
-                if (coreHeadNum <= 1) {
-                    DataCopyPad(gLse, lse[taskOffset], DataCopyExtParams(1, inRowActual * sizeof(float), 0, 0, 0));
-                } else {
-                    if (qSBlockSize % FLT_PER_DATABLOCK > 0) {
-                        DataCopyPad(
-                            gUpdate, lse[taskOffset], DataCopyExtParams(1, inRowActual * sizeof(float), 0, 0, 0));
-                        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
-                        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
-                        DataCopyPad(
-                            lse[taskOffset], gUpdate,
-                            DataCopyExtParams(coreHeadNum, qSBlockSize * sizeof(float), 0, 0, 0),
-                            DataCopyPadExtParams<ElementLse>());
-                        SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
-                        WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
-                    }
-                    DataCopyPad(
-                        gLse, lse[taskOffset],
-                        DataCopyExtParams(
-                            coreHeadNum, qSBlockSize * sizeof(float), 0, (strideLSE - qSBlockSize) * sizeof(float), 0));
-                }
+                CopyLseToGm(gLse, gUpdate, coreRow, coreHeadNum, qSOffset, qSBlockSize, strideLse);
                 SetFlag<HardEvent::MTE3_V>(taskEvent); // 通知当前 task 已释放临时空间
             }
 
@@ -205,7 +255,7 @@ public:
             WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
 
             // move O to GM
-            CopyOToGm(gOutput, rowNum, rowOffset, qSBlockSize, embed, embedRound, strideO);
+            CopyOToGm(gOutput, rowNum, rowOffset, qSOffset, qSBlockSize, embed, embedRound, strideO);
 
         } else if (multipleRowLoop) {
             SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
@@ -224,40 +274,39 @@ public:
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
+        uint32_t embedRound = layoutInput.stride(0);
         uint32_t strideO = layoutOutput.stride(0);
-        uint32_t strideLSE = layoutLse.stride(0);
-        uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / embed);
+        uint32_t strideLse = layoutLse.stride(0);
 
-        uint32_t coreIdx = GetSubBlockIdx();
-        uint32_t qNSplit = qNBlockSize / 2;
-        uint32_t inRowSplit = (qNBlockSize == 1) ? (qSBlockSize / 2) : (qSBlockSize * qNSplit);
-        uint32_t coreHeadNum = (coreIdx == 1) ? (qNBlockSize - qNSplit) : qNSplit;
-        uint32_t inRowActual = (coreIdx == 1) ? (rowNum - inRowSplit) : inRowSplit;
-        uint32_t inRowOffset = coreIdx * inRowSplit;
+        bool core1 = GetSubBlockIdx();
+        uint32_t rowSplit = rowNum / NUM_2;
+        uint32_t coreRow = core1 ? (rowNum - rowSplit) : rowSplit;
 
-        if (inRowActual == 0) {
+        if (coreRow == 0) {
             return;
         }
 
-        uint32_t rowLoop = CeilDiv(inRowActual, rowNumTile);
-        uint32_t outRowOffset = (qNBlockSize == 1) ? inRowOffset : 0;
-        uint32_t outColOffset = (qNBlockSize == 1) ? 0 : (coreIdx * qNSplit * embed);
-        uint32_t lseRowOffset = (qNBlockSize == 1) ? 0 : (coreIdx * qNSplit);
-        uint32_t lseColOffset = (qNBlockSize == 1) ? inRowOffset : 0;
+        uint32_t coreRowOffset = core1 ? rowSplit : 0;
+        uint32_t qSOffset = core1 ? (rowSplit % qSBlockSize) : 0;
+        uint32_t coreQNOffset = core1 ? (qNBlockSize / NUM_2) : 0;
+        uint32_t coreHeadNum = CeilDiv<NUM_2>(qNBlockSize);
+
+        uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / embedRound);
+        uint32_t rowLoop = CeilDiv(coreRow, rowNumTile);
 
         for (uint32_t rowIdx = 0; rowIdx < rowLoop; rowIdx++) {
             uint32_t rowOffset = rowIdx * rowNumTile;
-            uint32_t gmRowOffset = inRowOffset + rowOffset;
-            uint32_t rowNumCurLoop = (rowIdx == rowLoop - 1) ? (inRowActual - rowOffset) : rowNumTile;
+            uint32_t rowOffsetActual = coreRowOffset + rowOffset;
+            uint32_t rowNumCurLoop = (rowIdx == rowLoop - 1) ? (coreRow - rowOffset) : rowNumTile;
 
             SubCoreCompute(
-                gOutput[layoutOutput.GetOffset(MatrixCoord(outRowOffset, outColOffset))],
-                gInput[layoutInput.GetOffset(MatrixCoord(gmRowOffset, 0))],
-                gUpdate[layoutUpdate.GetOffset(MatrixCoord(gmRowOffset, 0))],
-                gLse[layoutLse.GetOffset(MatrixCoord(lseRowOffset, lseColOffset))],
-                layoutInput.GetTileLayout(MatrixCoord(rowNumCurLoop, embed)), inRowActual, isFirstStackTile,
+                gOutput[layoutOutput.GetOffset(MatrixCoord(0, coreQNOffset * embed))],
+                gInput[layoutInput.GetOffset(MatrixCoord(rowOffsetActual, 0))],
+                gUpdate[layoutUpdate.GetOffset(MatrixCoord(rowOffsetActual, 0))],
+                gLse[layoutLse.GetOffset(MatrixCoord(coreQNOffset, qSOffset))],
+                layoutInput.GetTileLayout(MatrixCoord(rowNumCurLoop, embed)), coreRow, isFirstStackTile,
                 isLastStackTile, curStackTileMod, (rowLoop > 1), (rowIdx == rowLoop - 1), rowOffset, qSBlockSize,
-                coreHeadNum, strideLSE, strideO);
+                qSOffset, coreHeadNum, strideLse, strideO);
         }
     }
 

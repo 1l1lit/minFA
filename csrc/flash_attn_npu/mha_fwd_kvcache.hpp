@@ -133,7 +133,7 @@ public:
         uint32_t strideK = kvHeads * embed;
         uint32_t strideV = kvHeads * embed;
         uint32_t strideO = qHeads * embed;
-        uint32_t embedRound = RoundUp<NUM_16>(embed);
+        uint32_t embedRound = RoundUp<HALF_PER_DATABLOCK>(embed);
         uint32_t groupSize = qHeads / kvHeads;
         uint32_t stackSeqTile = MAX_KV_STACK_LEN;
 
@@ -171,6 +171,7 @@ public:
         uint32_t curQSBlockTile = 0;
         uint32_t curQSBlockNum = 0;
 
+        // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
         uint32_t strideLse;
         if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
             strideLse = gActualQseqlen.GetValue(batch); // totalQTokens
@@ -229,7 +230,6 @@ public:
                         blockBOffset += maxNumBlocksPerBatch;
                     }
                     oBOffset += qSeqlen * strideO;
-                    // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
                     if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
                         lseBOffset += qSeqlen;
                     } else {
@@ -341,8 +341,8 @@ public:
                             if (applyMask) {
                                 epilogueOnlineSoftmax(
                                     gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask,
-                                    actualBlockShapeQK, (kvSIdx == 0), qSBlockSize, qNBlockSize, curStackTileMod,
-                                    qkReady, triUp, kvSStartIdx, kvSEndIdx);
+                                    actualBlockShapeQK, (kvSIdx == 0), qSBlockSize, curStackTileMod, qkReady, triUp,
+                                    kvSStartIdx, kvSEndIdx);
                             }
                         }
 
@@ -350,7 +350,7 @@ public:
                             Arch::CrossCoreWaitFlag(qkReady);
                             epilogueOnlineSoftmax(
                                 gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0),
-                                qSBlockSize, qNBlockSize, curStackTileMod);
+                                curStackTileMod);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }

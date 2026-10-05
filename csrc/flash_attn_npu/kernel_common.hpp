@@ -21,6 +21,7 @@ constexpr uint32_t MAX_UB_ELEM_NUM = 8192;
 constexpr uint32_t PRE_LAUNCH = 1;
 constexpr uint32_t DOUBLE_BUFFER = 2;
 constexpr uint32_t SYNC_MODE = 0x2;
+constexpr uint32_t NUM_2 = 2;
 constexpr uint32_t NUM_16 = 16;
 constexpr uint32_t NUM_32 = 32;
 constexpr uint32_t NUM_128 = 128;
