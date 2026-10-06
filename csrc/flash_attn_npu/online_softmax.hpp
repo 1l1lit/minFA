@@ -33,7 +33,7 @@ public:
     using LayoutInput = typename InputType_::Layout;
     using LayoutMask = typename MaskType_::Layout;
 
-    CATLASS_DEVICE void init(Arch::Resource<ArchTag>& resource, float scaleVal_)
+    CATLASS_INLINE void init(Arch::Resource<ArchTag>& resource, float scaleVal_)
     {
         scaleVal = scaleVal_;
 
@@ -67,13 +67,13 @@ public:
         tv = resource.ubBuf.template GetBufferByByte<float>(TV_OFFSET);
     }
 
-    CATLASS_DEVICE void set_curTaskMod(uint32_t curTaskMod)
+    CATLASS_INLINE void set_curTaskMod(uint32_t curTaskMod)
     {
         taskEvent = curTaskMod + 2;
         taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
     }
 
-    CATLASS_DEVICE void RowMax512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
+    CATLASS_INLINE void RowMax512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
         uint32_t repeatTime = 512 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceMax<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
@@ -88,7 +88,7 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    CATLASS_DEVICE void RowMax256(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
+    CATLASS_INLINE void RowMax256(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
         uint32_t repeatTime = 256 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceMax<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
@@ -106,7 +106,7 @@ public:
         ResetMask();
     }
 
-    CATLASS_DEVICE void RowMaxTail(
+    CATLASS_INLINE void RowMaxTail(
         const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum, uint32_t colNum,
         uint32_t colNumRound)
     {
@@ -153,7 +153,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void CalcLocalRowMax(uint32_t rowOffset, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound)
+    CATLASS_INLINE void CalcLocalRowMax(uint32_t rowOffset, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound)
     {
         if (colNum == 512) {
             RowMax512(lm[rowOffset], ls[pingPongOffset], rowNum);
@@ -164,7 +164,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void UpdateGlobalRowMax(
+    CATLASS_INLINE void UpdateGlobalRowMax(
         uint32_t rowNum, uint32_t dmOffset, uint32_t rowOffset, uint32_t isFirstStackTile)
     {
         if (isFirstStackTile) {
@@ -191,7 +191,7 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    CATLASS_DEVICE void RowSum512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
+    CATLASS_INLINE void RowSum512(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
         uint32_t repeatTime = 512 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceSum<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
@@ -206,7 +206,7 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    CATLASS_DEVICE void RowSum256(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
+    CATLASS_INLINE void RowSum256(const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum)
     {
         uint32_t repeatTime = 256 * RoundUp<FLT_PER_DATABLOCK>(rowNum) / FLT_PER_REPEAT;
         BlockReduceSum<float, false>(tv, src, repeatTime, 0, 1, 1, 8);
@@ -224,7 +224,7 @@ public:
         ResetMask();
     }
 
-    CATLASS_DEVICE void RowSumTail(
+    CATLASS_INLINE void RowSumTail(
         const LocalTensor<float>& dst, const LocalTensor<float>& src, uint32_t rowNum, uint32_t colNum,
         uint32_t colNumRound)
     {
@@ -271,7 +271,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void CalcLocalRowSum(uint32_t rowOffset, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound)
+    CATLASS_INLINE void CalcLocalRowSum(uint32_t rowOffset, uint32_t rowNum, uint32_t colNum, uint32_t colNumRound)
     {
         if (colNum == 512) {
             RowSum512(ll[rowOffset], ls[pingPongOffset], rowNum);
@@ -282,7 +282,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void UpdateGlobalRowSum(
+    CATLASS_INLINE void UpdateGlobalRowSum(
         uint32_t rowNum, uint32_t dmOffset, uint32_t rowOffset, uint32_t isFirstStackTile)
     {
         if (isFirstStackTile) {
@@ -304,7 +304,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void CopyMaskToUb(
+    CATLASS_INLINE void CopyMaskToUb(
         const GlobalTensor<ElementMask>& gMask, uint32_t rowNum, uint32_t maskColNum, uint32_t maskStride,
         uint32_t rowOffset, uint32_t qSOffset, uint32_t qSBlockSize)
     {
@@ -320,7 +320,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void ApplyMask(uint32_t rowNum, uint32_t colNumRound, uint32_t maskColNum, uint32_t applyMaskOffset)
+    CATLASS_INLINE void ApplyMask(uint32_t rowNum, uint32_t colNumRound, uint32_t maskColNum, uint32_t applyMaskOffset)
     {
         Cast<half, ElementMask, false>(
             mask16, mask, RoundMode::CAST_NONE, MASK_NUL, CeilDiv<HALF_PER_REPEAT>(rowNum * colNumRound),
@@ -366,7 +366,7 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    CATLASS_DEVICE void CalcExp(uint32_t rowNum, uint32_t colNum, uint32_t colNumRound, uint32_t rowOffset)
+    CATLASS_INLINE void CalcExp(uint32_t rowNum, uint32_t colNum, uint32_t colNumRound, uint32_t rowOffset)
     {
         // hm_block = expand_to_block(hm), 存放于 tv
         Brcb(tv, hm[rowOffset], CeilDiv<FLT_PER_DATABLOCK>(rowNum), BrcbRepeatParams());
@@ -396,7 +396,7 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    CATLASS_DEVICE void ScaleS(uint32_t rowNum, uint32_t colNumRound)
+    CATLASS_INLINE void ScaleS(uint32_t rowNum, uint32_t colNumRound)
     {
         Muls<float, false>(
             ls[pingPongOffset], ls[pingPongOffset], scaleVal, MASK_NUL, CeilDiv<FLT_PER_REPEAT>(rowNum * colNumRound),
@@ -404,7 +404,7 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    CATLASS_DEVICE void SubCoreCompute(
+    CATLASS_INLINE void SubCoreCompute(
         const GlobalTensor<ElementOutput>& gOutput, const LayoutOutput& layoutOutput, uint32_t rowOffset,
         uint32_t isFirstStackTile, uint32_t isFirstRowLoop, uint32_t colNumRound, uint32_t curStackTileMod)
     {
@@ -443,7 +443,7 @@ public:
         UpdateGlobalRowSum(rowNum, dmOffset, rowOffset, isFirstStackTile);
     }
 
-    CATLASS_DEVICE void operator()(
+    CATLASS_NORMAL void operator()(
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, GemmCoord actualBlockShape,
         uint32_t isFirstStackTile, uint32_t curStackTileMod)
@@ -501,7 +501,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void operator()(
+    CATLASS_NORMAL void operator()(
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const GlobalTensor<ElementMask>& gMask, const LayoutOutput& layoutOutput, const LayoutInput& layoutInput,
         const LayoutInput& layoutMask, GemmCoord actualBlockShape, uint32_t isFirstStackTile, uint32_t qSBlockSize,

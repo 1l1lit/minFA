@@ -62,7 +62,7 @@ public:
     using ElementUpdate = typename EpilogueRescaleO::ElementUpdate;
     using LayoutUpdate = typename EpilogueRescaleO::LayoutUpdate;
 
-    CATLASS_DEVICE void operator()(FAIKernelParams const& params)
+    CATLASS_INLINE void operator()(const FAIKernelParams& params)
     {
         auto fATilingData = reinterpret_cast<__gm__ FAInferTilingData*>(params.tiling);
         uint64_t mm1OutSize = fATilingData->mm1OutSize;

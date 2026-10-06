@@ -9,6 +9,9 @@
 
 #include "catlass/catlass.hpp"
 
+#define CATLASS_NORMAL __aicore__
+#define CATLASS_INLINE __forceinline__ __aicore__
+
 namespace KernelCommon {
 constexpr uint32_t QK_READY_ID = 1;
 constexpr uint32_t SOFTMAX_READY_ID = 2;
@@ -58,7 +61,7 @@ struct FAIKernelParams {
 };
 
 // 获取 Q 的 N 维分块大小
-CATLASS_DEVICE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
+CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
 {
     uint32_t qNBlockTile = Q_TILE_CEIL / qSeqlen;
     qNBlockTile = Min(qNBlockTile, groupSize); // qNBlock 不能跨 group
@@ -67,10 +70,10 @@ CATLASS_DEVICE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
 }
 
 // 获取 Q 的 S 维分块大小
-CATLASS_DEVICE uint32_t GetQSBlockTile() { return Q_TILE_CEIL; }
+CATLASS_INLINE uint32_t GetQSBlockTile() { return Q_TILE_CEIL; }
 
 // 设置向量掩码
-CATLASS_DEVICE void SetVecMaskLen(uint32_t len)
+CATLASS_INLINE void SetVecMaskLen(uint32_t len)
 {
     if (len >= 128) {
         AscendC::SetVectorMask<float>(MASK_ALL, MASK_ALL);
@@ -82,7 +85,7 @@ CATLASS_DEVICE void SetVecMaskLen(uint32_t len)
 }
 
 // 设置归约掩码
-CATLASS_DEVICE void SetBlockReduceMaskLen(uint32_t len)
+CATLASS_INLINE void SetBlockReduceMaskLen(uint32_t len)
 {
     if (len > 8) {
         AscendC::SetVectorMask<float>(MASK_ALL, MASK_ALL);

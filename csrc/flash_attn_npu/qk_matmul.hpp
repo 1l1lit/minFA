@@ -68,10 +68,10 @@ public:
 
     static_assert(std::is_same_v<LayoutC, layout::RowMajor>, "LayoutC only support RowMajor yet!");
 
-    CATLASS_DEVICE BlockMmad(uint32_t& l1BPingPong_, uint32_t& l0ABPingPong_, uint32_t& l0CPingPong_)
+    CATLASS_INLINE BlockMmad(uint32_t& l1BPingPong_, uint32_t& l0ABPingPong_, uint32_t& l0CPingPong_)
         : l1BPingPong(l1BPingPong_), l0ABPingPong(l0ABPingPong_), l0CPingPong(l0CPingPong_) {};
 
-    CATLASS_DEVICE void init(
+    CATLASS_INLINE void init(
         Arch::Resource<ArchTag>& resource, uint32_t nDyn, uint32_t kDyn, uint32_t KStackLen = MAX_KV_STACK_LEN,
         uint32_t l1BufAddrStart = 0)
     {
@@ -91,7 +91,7 @@ public:
         l1NDynamic = nDyn;
     }
 
-    CATLASS_DEVICE void loadQGM(
+    CATLASS_INLINE void loadQGM(
         const AscendC::GlobalTensor<ElementA>& gA, const LayoutA& layoutA, uint32_t qSBlockSize, uint32_t qNBlockSize,
         uint32_t strideQ)
     {
@@ -120,7 +120,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
     }
 
-    CATLASS_DEVICE void operator()(
+    CATLASS_NORMAL void operator()(
         const AscendC::GlobalTensor<ElementB>& gB, const AscendC::GlobalTensor<ElementC>& gC,
         const AscendC::GlobalTensor<int32_t>& gBlockTable, const LayoutB& layoutB, const LayoutC& layoutC,
         GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideK, uint32_t isLastStackTile)
