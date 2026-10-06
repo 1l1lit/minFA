@@ -137,6 +137,14 @@ public:
         uint32_t groupSize = qHeads / kvHeads;
         uint32_t stackSeqTile = MAX_KV_STACK_LEN;
 
+        // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
+        uint32_t strideLse;
+        if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
+            strideLse = gActualQseqlen.GetValue(batch); // totalQTokens
+        } else {
+            strideLse = maxQSeqlen;
+        }
+
         if ASCEND_IS_AIC {
             uint32_t kDynNum = RoundUp<NUM_128>(embed);                           // K 对应 D 维度
             uint32_t nDynNum = NUM_128;                                           // N 对应 KV 的序列长度
@@ -165,19 +173,8 @@ public:
         uint32_t preTotalTaskNum = 0;
         uint32_t curTotalTaskNum = 0;
         uint32_t curBatch = 0;
-        uint32_t curQNBlockTile = 0;
-        uint32_t qNBlockNumPerGroup = 0;
-        uint32_t curQNBlockNum = 0;
-        uint32_t curQSBlockTile = 0;
-        uint32_t curQSBlockNum = 0;
-
-        // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
-        uint32_t strideLse;
-        if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
-            strideLse = gActualQseqlen.GetValue(batch); // totalQTokens
-        } else {
-            strideLse = maxQSeqlen;
-        }
+        uint32_t normQSBlockTile, normQSBlockNum, normQNBlockTile, normQNGroupBlockNum, normQNBlockNum, normTaskNum;
+        uint32_t tailQSBlockTile, tailQSBlockNum, tailQNBlockTile, tailQNGroupBlockNum, tailQNBlockNum, tailTaskNum;
 
         struct TaskInfo {
             uint32_t kvSIdx, kvSLoop;
@@ -245,57 +242,63 @@ public:
                         kvSeqlen = gActualKvseqlen.GetValue(curBatch + 1) - gActualKvseqlen.GetValue(curBatch);
                     }
                 }
-                curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);     // Q 的 N 维分块大小
-                qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile); // 每个 group 的 N 维分块数量，向上取整
-                curQNBlockNum = qNBlockNumPerGroup * kvHeads;            // Q 的 N 维分块数量
-                curQSBlockTile = GetQSBlockTile();                       // Q 的 S 维分块大小
-                curQSBlockNum = CeilDiv(qSeqlen, curQSBlockTile);        // Q 的 S 维分块数量，向上取整
-                curTotalTaskNum += curQNBlockNum * curQSBlockNum;        // 新增当前 batch 的 Q 任务数量
+
+                normQSBlockTile = GetQSBlockTile();
+                normQSBlockNum = qSeqlen / normQSBlockTile;
+                if (normQSBlockNum > 0) {
+                    normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+                    normQNGroupBlockNum = CeilDiv(groupSize, normQNBlockTile);
+                    normQNBlockNum = normQNGroupBlockNum * kvHeads;
+                }
+
+                tailQSBlockTile = qSeqlen % normQSBlockTile;
+                if (tailQSBlockTile > 0) {
+                    tailQSBlockNum = 1;
+                    tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize);
+                    tailQNGroupBlockNum = CeilDiv(groupSize, tailQNBlockTile);
+                    tailQNBlockNum = tailQNGroupBlockNum * kvHeads;
+                } else {
+                    tailQSBlockNum = 0;
+                }
+
+                normTaskNum = normQNBlockNum * normQSBlockNum;
+                tailTaskNum = tailQNBlockNum * tailQSBlockNum;
+                curTotalTaskNum += normTaskNum + tailTaskNum;
                 curBatch++;
             }
 
             if (taskIdx < curTotalTaskNum) {
-                uint32_t taskIdxCurBatch = taskIdx - preTotalTaskNum;
-                uint32_t qSBlockIdx = taskIdxCurBatch / curQNBlockNum;         // task 的 S 维分块索引
-                uint32_t qNBlockIdx = taskIdxCurBatch % curQNBlockNum;         // task 的 N 维分块索引
-                uint32_t qSStartIdx = qSBlockIdx * curQSBlockTile;             // Q 的 S 维元素起始索引
-                uint32_t qNBlockIdxCurGroup = qNBlockIdx % qNBlockNumPerGroup; // Q 的 group 内 N 维分块索引
-                uint32_t kvNIdx = qNBlockIdx / qNBlockNumPerGroup;             // Q 对应 KV 的 N 维分块索引
-                uint32_t qNStartIdx = kvNIdx * groupSize + qNBlockIdxCurGroup * curQNBlockTile; // Q 的 N 维元素起始索引
+                uint32_t curTaskIdx = taskIdx - preTotalTaskNum;
+                bool tailTask = (curTaskIdx >= normTaskNum);
+                uint32_t nowTaskIdx = curTaskIdx - (tailTask ? normTaskNum : 0);
 
-                gmOffsetQ = qBOffset +             // B 偏移
-                            qSStartIdx * strideQ + // S 偏移
-                            qNStartIdx * embed;    // N 偏移
+                uint32_t qSStartIdx =
+                    tailTask ? (qSeqlen - tailQSBlockTile) : (nowTaskIdx / normQNBlockNum) * normQSBlockTile;
+                uint32_t qNBlockTile = tailTask ? tailQNBlockTile : normQNBlockTile;
+                uint32_t qNGroupBlockNum = tailTask ? tailQNGroupBlockNum : normQNGroupBlockNum;
+                uint32_t qNBlockIdx = tailTask ? nowTaskIdx : (nowTaskIdx % normQNBlockNum);
+                uint32_t qNGroupBlockIdx = qNBlockIdx % qNGroupBlockNum;
+                uint32_t kvNIdx = qNBlockIdx / qNGroupBlockNum;
+                uint32_t qNStartIdx = kvNIdx * groupSize + qNGroupBlockIdx * qNBlockTile;
 
-                gmOffsetK = kBOffset +      // B 偏移
-                            kvNIdx * embed; // N 偏移，在后面遍历 S 维
+                qSBlockSize = tailTask ? tailQSBlockTile : normQSBlockTile;
+                qNBlockSize = (qNGroupBlockIdx == qNGroupBlockNum - 1) ? (groupSize - qNGroupBlockIdx * qNBlockTile)
+                                                                       : qNBlockTile;
+                rowNum = qSBlockSize * qNBlockSize;
 
-                gmOffsetV = vBOffset +      // B 偏移
-                            kvNIdx * embed; // N 偏移，在后面遍历 S 维
-
-                gmOffsetO = oBOffset +             // B 偏移
-                            qSStartIdx * strideO + // S 偏移
-                            qNStartIdx * embed;    // N 偏移
-
-                gmOffsetLse = lseBOffset +             // B 偏移
-                              qNStartIdx * strideLse + // N 偏移
-                              qSStartIdx;              // S 偏移
-
+                gmOffsetQ = qBOffset + qSStartIdx * strideQ + qNStartIdx * embed;
+                gmOffsetK = kBOffset + kvNIdx * embed;
+                gmOffsetV = vBOffset + kvNIdx * embed;
+                gmOffsetO = oBOffset + qSStartIdx * strideO + qNStartIdx * embed;
+                gmOffsetLse = lseBOffset + qNStartIdx * strideLse + qSStartIdx;
                 gmOffsetBlock = blockBOffset;
-
-                qSBlockSize = (qSBlockIdx == curQSBlockNum - 1) ? (qSeqlen - qSStartIdx) : curQSBlockTile;
-                qNBlockSize = (qNBlockIdxCurGroup == qNBlockNumPerGroup - 1)
-                                  ? (groupSize - qNBlockIdxCurGroup * curQNBlockTile)
-                                  : curQNBlockTile;
-                rowNum = qSBlockSize * qNBlockSize; // task 的 Q 行数
 
                 if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
                     int32_t seqDiff = static_cast<int32_t>(kvSeqlen) - static_cast<int32_t>(qSeqlen);
-                    int32_t qSStartIdx = qSBlockIdx * curQSBlockTile; // Q 分块的开始下标（闭区间）
-                    triUp = Max(qSStartIdx + seqDiff, 0);             // Q 分块首行允许访问的最大 KV 下标
-                    int32_t qSEndIdx = qSStartIdx + qSBlockSize;      // Q 分块的结束下标（开区间）
-                    noSkipKvS = Max(qSEndIdx + seqDiff, 0);           // task 计算的 KV 序列长度
-                    noSkipKvS = Min(kvSeqlen, noSkipKvS);             // 不超过实际的 KV 序列长度
+                    triUp = Max(static_cast<int32_t>(qSStartIdx) + seqDiff, 0); // Q 分块首行允许访问的最大 KV 下标
+                    int32_t qSEndIdx = qSStartIdx + qSBlockSize;                // Q 分块的结束下标（开区间）
+                    noSkipKvS = Max(qSEndIdx + seqDiff, 0);                     // task 计算的 KV 序列长度
+                    noSkipKvS = Min(kvSeqlen, noSkipKvS);                       // 不超过实际的 KV 序列长度
                 } else {
                     noSkipKvS = kvSeqlen; // task 计算的 KV 序列长度
                 }
