@@ -270,7 +270,7 @@ public:
             if (taskIdx < curTotalTaskNum) {
                 uint32_t curTaskIdx = taskIdx - preTotalTaskNum;
                 bool tailTask = (curTaskIdx >= normTaskNum);
-                uint32_t nowTaskIdx = curTaskIdx - (tailTask ? normTaskNum : 0);
+                uint32_t nowTaskIdx = tailTask ? (curTaskIdx - normTaskNum) : curTaskIdx;
 
                 uint32_t qSStartIdx =
                     tailTask ? (qSeqlen - tailQSBlockTile) : (nowTaskIdx / normQNBlockNum) * normQSBlockTile;

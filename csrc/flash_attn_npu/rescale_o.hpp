@@ -106,14 +106,14 @@ public:
         }
 
         // *** Align ***
-        uint32_t epiTokenNum = (rowNum - preTokenNum) % qSBlockSize;
-        headNum = epiTokenNum ? (headNum - 1) : headNum;
+        uint32_t nowRowNum = rowNum - preTokenNum;
         bool preTokenNotAlign = (gmAlign > 0);
         bool qSBlockSizeNotAlign = (qSBlockSize % FLT_PER_DATABLOCK > 0);
         if (preTokenNotAlign || qSBlockSizeNotAlign) {
             // ** UB -> GM **
-            DataCopyPad(
-                gUpdate, lse[taskOffset][ubOffset], DataCopyExtParams(1, (rowNum - ubOffset) * sizeof(float), 0, 0, 0));
+            DataCopy(
+                gUpdate, lse[taskOffset][ubOffset],
+                DataCopyParams(1, CeilDiv(rowNum - ubOffset, FLT_PER_DATABLOCK), 0, 0));
             SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
             WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
             // ** GM -> UB **
@@ -122,23 +122,18 @@ public:
                     lse[taskOffset][ubOffset], gUpdate[gmAlign],
                     DataCopyExtParams(headNum, qSBlockSize * sizeof(float), 0, 0, 0),
                     DataCopyPadExtParams<ElementLse>());
-                if (epiTokenNum) {
-                    DataCopyPad(
-                        lse[taskOffset][ubOffset + headNum * RoundUp<FLT_PER_DATABLOCK>(qSBlockSize)],
-                        gUpdate[gmAlign + headNum * qSBlockSize],
-                        DataCopyExtParams(1, epiTokenNum * sizeof(float), 0, 0, 0), DataCopyPadExtParams<ElementLse>());
-                }
             } else {
-                DataCopyPad(
+                DataCopy(
                     lse[taskOffset][ubOffset], gUpdate[gmAlign],
-                    DataCopyExtParams(1, (rowNum - preTokenNum) * sizeof(float), 0, 0, 0),
-                    DataCopyPadExtParams<ElementLse>());
+                    DataCopyParams(1, CeilDiv(nowRowNum, FLT_PER_DATABLOCK), 0, 0));
             }
             SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
             WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID0);
         }
 
         // *** IntegralHead ***
+        uint32_t epiTokenNum = nowRowNum % qSBlockSize;
+        headNum = epiTokenNum ? (headNum - 1) : headNum;
         DataCopyPad(
             gLse[gmOffset], lse[taskOffset][ubOffset],
             DataCopyExtParams(headNum, qSBlockSize * sizeof(float), 0, (strideLse - qSBlockSize) * sizeof(float), 0));
@@ -278,7 +273,7 @@ public:
         uint32_t strideO = layoutOutput.stride(0);
         uint32_t strideLse = layoutLse.stride(0);
 
-        bool core1 = GetSubBlockIdx();
+        uint32_t core1 = GetSubBlockIdx();
         uint32_t rowSplit = rowNum / NUM_2;
         uint32_t coreRow = core1 ? (rowNum - rowSplit) : rowSplit;
 

@@ -453,7 +453,7 @@ public:
         uint32_t colNumRound = RoundUp<NUM_32>(colNum);
         uint32_t colStride = layoutInput.stride(0);
 
-        bool core1 = GetSubBlockIdx();
+        uint32_t core1 = GetSubBlockIdx();
         uint32_t rowSplit = rowNum / NUM_2;
         uint32_t coreRow = core1 ? (rowNum - rowSplit) : rowSplit;
 
@@ -513,7 +513,7 @@ public:
         uint32_t colStride = layoutInput.stride(0);
         uint32_t maskStride = layoutMask.stride(0);
 
-        bool core1 = GetSubBlockIdx();
+        uint32_t core1 = GetSubBlockIdx();
         uint32_t rowSplit = rowNum / NUM_2;
         uint32_t coreRow = core1 ? (rowNum - rowSplit) : rowSplit;
 
