@@ -120,7 +120,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
     }
 
-    CATLASS_NORMAL void operator()(
+    CATLASS_INLINE void operator()(
         const AscendC::GlobalTensor<ElementB>& gB, const AscendC::GlobalTensor<ElementC>& gC,
         const AscendC::GlobalTensor<int32_t>& gBlockTable, const LayoutB& layoutB, const LayoutC& layoutC,
         GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideK, uint32_t isLastStackTile)

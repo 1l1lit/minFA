@@ -42,9 +42,9 @@ constexpr uint32_t HALF_PER_DATABLOCK = 16;
 constexpr uint32_t FLT_PER_REPEAT = 64;
 constexpr uint32_t HALF_PER_REPEAT = 128;
 
-enum class MaskType : uint32_t { NO_MASK = 0, MASK_CAUSAL = 1 };
+enum class MaskModeT : uint32_t { NO_MASK = 0, MASK_CAUSAL = 1 };
 
-enum class InputLayout : uint32_t { BSND = 0, TND = 1 };
+enum class InputLayoutT : uint32_t { BSND = 0, TND = 1 };
 
 struct FAIKernelParams {
     GM_ADDR q;

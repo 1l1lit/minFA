@@ -91,7 +91,7 @@ public:
         l1KDynamic = kDyn;
     }
 
-    CATLASS_NORMAL void operator()(
+    CATLASS_INLINE void operator()(
         const AscendC::GlobalTensor<ElementA>& gA, const AscendC::GlobalTensor<ElementB>& gB,
         const AscendC::GlobalTensor<ElementC>& gC, const AscendC::GlobalTensor<int32_t>& gBlockTable,
         const LayoutA& layoutA, const LayoutB& layoutB, const LayoutC& layoutC, GemmCoord actualOriShape, uint32_t nIdx,

@@ -8,8 +8,9 @@
 #define FAI_BLOCK_HPP
 
 #include "catlass/catlass.hpp"
-#include "catlass/arch/arch.hpp"
 #include "catlass/gemm/dispatch_policy.hpp"
+
+#include "kernel_common.hpp"
 
 namespace Catlass::Gemm {
 template <bool PAGED_CACHE_FLAG_ = false>
@@ -26,7 +27,10 @@ struct MmadAtlasA2FAIQKT : public Gemm::MmadAtlasA2 {
 } // namespace Catlass::Gemm
 
 namespace Catlass::Epilogue {
-struct EpilogueAtlasA2OnlineSoftmaxT {};
+template <KernelCommon::MaskModeT MASK_MODE_>
+struct EpilogueAtlasA2OnlineSoftmaxT {
+    static constexpr KernelCommon::MaskModeT MASK_MODE = MASK_MODE_;
+};
 
 struct EpilogueAtlasA2RescaleOT {};
 } // namespace Catlass::Epilogue

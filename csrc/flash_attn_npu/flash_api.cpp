@@ -16,11 +16,11 @@
         fftsAddr, qDevice, kDevice, vDevice, maskDevice, blockTableDevice, oDevice, softmaxLseDevice, qSeqDevice, \
         kvSeqDevice, workspaceDevice, tilingDevice)
 
-#define CASE_FA(T, PAGED, CAUSAL, VARLEN)                                   \
-    case ((PAGED << 2) | (CAUSAL << 1) | (VARLEN << 0)):                    \
-        FA_INFER(                                                           \
-            T, PAGED, (CAUSAL ? MaskType::MASK_CAUSAL : MaskType::NO_MASK), \
-            (VARLEN ? InputLayout::TND : InputLayout::BSND));               \
+#define CASE_FA(T, PAGED, CAUSAL, VARLEN)                                     \
+    case ((PAGED << 2) | (CAUSAL << 1) | (VARLEN << 0)):                      \
+        FA_INFER(                                                             \
+            T, PAGED, (CAUSAL ? MaskModeT::MASK_CAUSAL : MaskModeT::NO_MASK), \
+            (VARLEN ? InputLayoutT::TND : InputLayoutT::BSND));               \
         break
 
 std::vector<at::Tensor> mha_fwd_kvcache(
@@ -152,9 +152,8 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        uint32_t mask_row = KernelCommon::MAX_KV_STACK_LEN;
-        uint32_t mask_col = 2 * KernelCommon::MAX_KV_STACK_LEN;
-        at::Tensor mask_cpu_tensor = at::ones({mask_row, mask_col}, at::device(c10::kCPU).dtype(at::kByte));
+        uint32_t mask_len = 2 * KernelCommon::MAX_KV_STACK_LEN;
+        at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
         maskDevice = static_cast<uint8_t*>(mask_npu_tensor.data_ptr());
@@ -250,9 +249,8 @@ std::vector<at::Tensor> mha_fwd(
     uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        uint32_t mask_row = KernelCommon::MAX_KV_STACK_LEN;
-        uint32_t mask_col = 2 * KernelCommon::MAX_KV_STACK_LEN;
-        at::Tensor mask_cpu_tensor = at::ones({mask_row, mask_col}, at::device(c10::kCPU).dtype(at::kByte));
+        uint32_t mask_len = 2 * KernelCommon::MAX_KV_STACK_LEN;
+        at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
         maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));
@@ -434,9 +432,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     uint8_t* maskDevice = nullptr;
     at::Tensor mask_npu_tensor;
     if (is_causal) {
-        uint32_t mask_row = KernelCommon::MAX_KV_STACK_LEN;
-        uint32_t mask_col = 2 * KernelCommon::MAX_KV_STACK_LEN;
-        at::Tensor mask_cpu_tensor = at::ones({mask_row, mask_col}, at::device(c10::kCPU).dtype(at::kByte));
+        uint32_t mask_len = 2 * KernelCommon::MAX_KV_STACK_LEN;
+        at::Tensor mask_cpu_tensor = at::ones({mask_len, mask_len}, at::device(c10::kCPU).dtype(at::kByte));
         mask_cpu_tensor = at::triu(mask_cpu_tensor, 1);
         mask_npu_tensor = mask_cpu_tensor.to(at::Device(at::kPrivateUse1));
         maskDevice = static_cast<uint8_t*>(const_cast<void*>(mask_npu_tensor.data_ptr()));

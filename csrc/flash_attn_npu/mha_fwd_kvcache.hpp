@@ -32,11 +32,9 @@ using namespace KernelCommon;
 
 template <
     class BlockMmadQK, class BlockMmadPV, class EpilogueOnlineSoftmax, class EpilogueRescaleO, bool PAGED_CACHE_FLAG_,
-    MaskType MASK_TYPE_, InputLayout INPUT_LAYOUT_>
+    MaskModeT MASK_MODE_, InputLayoutT INPUT_LAYOUT_>
 class FAInferKernel {
 public:
-    using ArchTag = Arch::AtlasA2;
-
     using ElementQ = typename BlockMmadQK::ElementA;
     using LayoutQ = typename BlockMmadQK::LayoutA;
     using ElementK = typename BlockMmadQK::ElementB;
@@ -62,51 +60,39 @@ public:
     using ElementUpdate = typename EpilogueRescaleO::ElementUpdate;
     using LayoutUpdate = typename EpilogueRescaleO::LayoutUpdate;
 
-    CATLASS_INLINE void operator()(const FAIKernelParams& params)
+    CATLASS_INLINE void PreProcess(const FAIKernelParams& params)
     {
         auto fATilingData = reinterpret_cast<__gm__ FAInferTilingData*>(params.tiling);
         uint64_t mm1OutSize = fATilingData->mm1OutSize;
         uint64_t smOnlineOutSize = fATilingData->smOnlineOutSize;
         uint64_t mm2OutSize = fATilingData->mm2OutSize;
-        uint32_t batch = fATilingData->batch;
-        uint32_t qHeads = fATilingData->numHeads;
-        uint32_t kvHeads = fATilingData->kvHeads;
-        uint32_t embed = fATilingData->embeddingSize;
-        uint32_t pagedBlockSize = fATilingData->blockSize;
-        uint32_t maxNumBlocksPerBatch = fATilingData->maxNumBlocksPerBatch;
-        uint32_t maxQSeqlen = fATilingData->maxQSeqlen;
         float scaleValue = fATilingData->scaleValue;
 
-        AscendC::GlobalTensor<ElementQ> gQ;
+        batch = fATilingData->batch;
+        qHeads = fATilingData->numHeads;
+        kvHeads = fATilingData->kvHeads;
+        embed = fATilingData->embeddingSize;
+        pagedBlockSize = fATilingData->blockSize;
+        maxNumBlocksPerBatch = fATilingData->maxNumBlocksPerBatch;
+        maxQSeqlen = fATilingData->maxQSeqlen;
+
         gQ.SetGlobalBuffer((__gm__ ElementQ*)params.q);
-        AscendC::GlobalTensor<ElementK> gK;
         gK.SetGlobalBuffer((__gm__ ElementK*)params.k);
-        AscendC::GlobalTensor<ElementV> gV;
         gV.SetGlobalBuffer((__gm__ ElementV*)params.v);
 
-        AscendC::GlobalTensor<ElementMask> gMask;
         gMask.SetGlobalBuffer((__gm__ ElementMask*)params.mask);
-        AscendC::GlobalTensor<int32_t> gBlockTable;
         gBlockTable.SetGlobalBuffer((__gm__ int32_t*)params.blockTable);
-        AscendC::GlobalTensor<int32_t> gActualQseqlen;
         gActualQseqlen.SetGlobalBuffer((__gm__ int32_t*)params.actualQseqlen);
-        AscendC::GlobalTensor<int32_t> gActualKvseqlen;
         gActualKvseqlen.SetGlobalBuffer((__gm__ int32_t*)params.actualKvseqlen);
 
-        AscendC::GlobalTensor<ElementO> gO;
         gO.SetGlobalBuffer((__gm__ ElementO*)params.o);
         gO.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
-        AscendC::GlobalTensor<ElementLse> gLse;
         gLse.SetGlobalBuffer((__gm__ ElementLse*)params.lse);
         gLse.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
 
-        AscendC::GlobalTensor<ElementS> gS;
         gS.SetGlobalBuffer((__gm__ ElementS*)(params.workspace));
-        AscendC::GlobalTensor<ElementP> gP;
         gP.SetGlobalBuffer((__gm__ ElementP*)(params.workspace + mm1OutSize));
-        AscendC::GlobalTensor<ElementOTmp> gOTmp;
         gOTmp.SetGlobalBuffer((__gm__ ElementOTmp*)(params.workspace + mm1OutSize + smOnlineOutSize));
-        AscendC::GlobalTensor<ElementOTmp> gOUpdate;
         gOUpdate.SetGlobalBuffer((__gm__ ElementOTmp*)(params.workspace + mm1OutSize + smOnlineOutSize + mm2OutSize));
 
         if ASCEND_IS_AIC {
@@ -129,30 +115,28 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
         }
 
-        uint32_t strideQ = qHeads * embed;
-        uint32_t strideK = kvHeads * embed;
-        uint32_t strideV = kvHeads * embed;
-        uint32_t strideO = qHeads * embed;
-        uint32_t embedRound = RoundUp<HALF_PER_DATABLOCK>(embed);
-        uint32_t groupSize = qHeads / kvHeads;
-        uint32_t stackSeqTile = MAX_KV_STACK_LEN;
+        strideQ = qHeads * embed;
+        strideK = kvHeads * embed;
+        strideV = kvHeads * embed;
+        strideO = qHeads * embed;
+        embedRound = RoundUp<HALF_PER_DATABLOCK>(embed);
+        groupSize = qHeads / kvHeads;
 
         // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
-        uint32_t strideLse;
-        if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
+        if constexpr (INPUT_LAYOUT_ == InputLayoutT::TND) {
             strideLse = gActualQseqlen.GetValue(batch); // totalQTokens
         } else {
             strideLse = maxQSeqlen;
         }
 
         if ASCEND_IS_AIC {
-            uint32_t kDynNum = RoundUp<NUM_128>(embed);                           // K 对应 D 维度
-            uint32_t nDynNum = NUM_128;                                           // N 对应 KV 的序列长度
-            uint32_t kPVDynNum = nDynNum * kDynNum / BlockMmadPV::L1TileShape::M; // P 复用 K 的 L1 空间
-            uint32_t maxQL1Size = kDynNum * Q_TILE_CEIL * sizeof(ElementQ);       // Q 的预留 L1 空间
+            uint32_t kDynQK = RoundUp<NUM_128>(embed);                       // K 对应 D 维度
+            uint32_t nDynQK = NUM_128;                                       // N 对应 KV 的序列长度
+            uint32_t kDynPV = kDynQK * nDynQK / BlockMmadPV::L1TileShape::M; // P 复用 K 的 L1 空间
+            uint32_t maxQL1Size = kDynQK * Q_TILE_CEIL * sizeof(ElementQ);   // Q 的预留 L1 空间
 
-            blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN);
-            blockMmadPV.init(resource, kPVDynNum, MAX_KV_STACK_LEN, maxQL1Size);
+            blockMmadQK.init(resource, nDynQK, kDynQK, MAX_KV_STACK_LEN);
+            blockMmadPV.init(resource, kDynPV, MAX_KV_STACK_LEN, maxQL1Size);
 
             layoutKTmp = LayoutK(strideK, MAX_KV_STACK_LEN);
             layoutVTmp = LayoutV(MAX_KV_STACK_LEN, strideV);
@@ -160,39 +144,19 @@ public:
             epilogueOnlineSoftmax.init(resource, scaleValue);
             epilogueRescaleO.init(resource);
 
-            layoutMask = LayoutMask(MAX_KV_STACK_LEN, 2 * MAX_KV_STACK_LEN);
+            layoutMask = LayoutMask(2 * MAX_KV_STACK_LEN, 2 * MAX_KV_STACK_LEN);
         }
 
-        uint64_t qBOffset = 0;
-        uint64_t kBOffset = 0;
-        uint64_t vBOffset = 0;
-        uint64_t oBOffset = 0;
-        uint64_t lseBOffset = 0;
-        uint64_t blockBOffset = 0;
-
-        uint32_t preTotalTaskNum = 0;
-        uint32_t curTotalTaskNum = 0;
-        uint32_t curBatch = 0;
-        uint32_t normQSBlockTile, normQSBlockNum, normQNBlockTile, normQNGroupBlockNum, normQNBlockNum, normTaskNum;
-        uint32_t tailQSBlockTile, tailQSBlockNum, tailQNBlockTile, tailQNGroupBlockNum, tailQNBlockNum, tailTaskNum;
-
-        struct TaskInfo {
-            uint32_t kvSIdx, kvSLoop;
-            uint32_t qSeqlen, kvSeqlen, triUp, noSkipKvS;
-            uint64_t gmOffsetQ, gmOffsetK, gmOffsetV, gmOffsetO, gmOffsetLse, gmOffsetBlock;
-            uint32_t qSBlockSize, qNBlockSize, rowNum;
-        };
-        TaskInfo taskInfo[2];
-        uint32_t curTaskMod = 0;
-
-        uint32_t coreNum = AscendC::GetBlockNum();
-        uint32_t coreIdx;
+        coreNum = AscendC::GetBlockNum();
         if ASCEND_IS_AIC {
             coreIdx = AscendC::GetBlockIdx();
         } else {
             coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
         }
+    }
 
+    CATLASS_NORMAL void RunMainLoop()
+    {
         uint32_t loopNum = 0;
         uint32_t kvSTail = 0;
         for (uint32_t taskIdx = coreIdx; kvSTail == 0; taskIdx += coreNum, curTaskMod ^= 1) {
@@ -227,7 +191,7 @@ public:
                         blockBOffset += maxNumBlocksPerBatch;
                     }
                     oBOffset += qSeqlen * strideO;
-                    if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
+                    if constexpr (INPUT_LAYOUT_ == InputLayoutT::TND) {
                         lseBOffset += qSeqlen;
                     } else {
                         lseBOffset += qSeqlen * qHeads;
@@ -236,7 +200,7 @@ public:
 
                 qSeqlen = maxQSeqlen;
                 kvSeqlen = gActualKvseqlen.GetValue(curBatch);
-                if constexpr (INPUT_LAYOUT_ == InputLayout::TND) {
+                if constexpr (INPUT_LAYOUT_ == InputLayoutT::TND) {
                     qSeqlen = gActualQseqlen.GetValue(curBatch + 1) - gActualQseqlen.GetValue(curBatch);
                     if constexpr (!PAGED_CACHE_FLAG_) {
                         kvSeqlen = gActualKvseqlen.GetValue(curBatch + 1) - gActualKvseqlen.GetValue(curBatch);
@@ -270,13 +234,12 @@ public:
             if (taskIdx < curTotalTaskNum) {
                 uint32_t curTaskIdx = taskIdx - preTotalTaskNum;
                 bool tailTask = (curTaskIdx >= normTaskNum);
-                uint32_t nowTaskIdx = tailTask ? (curTaskIdx - normTaskNum) : curTaskIdx;
+                uint32_t& qNBlockTile = tailTask ? tailQNBlockTile : normQNBlockTile;
+                uint32_t& qNGroupBlockNum = tailTask ? tailQNGroupBlockNum : normQNGroupBlockNum;
 
                 uint32_t qSStartIdx =
-                    tailTask ? (qSeqlen - tailQSBlockTile) : (nowTaskIdx / normQNBlockNum) * normQSBlockTile;
-                uint32_t qNBlockTile = tailTask ? tailQNBlockTile : normQNBlockTile;
-                uint32_t qNGroupBlockNum = tailTask ? tailQNGroupBlockNum : normQNGroupBlockNum;
-                uint32_t qNBlockIdx = tailTask ? nowTaskIdx : (nowTaskIdx % normQNBlockNum);
+                    tailTask ? (qSeqlen - tailQSBlockTile) : ((curTaskIdx / normQNBlockNum) * normQSBlockTile);
+                uint32_t qNBlockIdx = tailTask ? (curTaskIdx - normTaskNum) : (curTaskIdx % normQNBlockNum);
                 uint32_t qNGroupBlockIdx = qNBlockIdx % qNGroupBlockNum;
                 uint32_t kvNIdx = qNBlockIdx / qNGroupBlockNum;
                 uint32_t qNStartIdx = kvNIdx * groupSize + qNGroupBlockIdx * qNBlockTile;
@@ -293,7 +256,7 @@ public:
                 gmOffsetLse = lseBOffset + qNStartIdx * strideLse + qSStartIdx;
                 gmOffsetBlock = blockBOffset;
 
-                if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
+                if constexpr (MASK_MODE_ == MaskModeT::MASK_CAUSAL) {
                     int32_t seqDiff = static_cast<int32_t>(kvSeqlen) - static_cast<int32_t>(qSeqlen);
                     triUp = Max(static_cast<int32_t>(qSStartIdx) + seqDiff, 0); // Q 分块首行允许访问的最大 KV 下标
                     int32_t qSEndIdx = qSStartIdx + qSBlockSize;                // Q 分块的结束下标（开区间）
@@ -334,26 +297,17 @@ public:
                     } else { // ASCEND_IS_AIV
                         LayoutP layoutP = layoutS;
                         uint64_t gmOffsetP = gmOffsetS;
-                        epilogueOnlineSoftmax.set_curTaskMod(curTaskMod);
-
-                        bool applyMask = false;
-                        if constexpr (MASK_TYPE_ == MaskType::MASK_CAUSAL) {
+                        if constexpr (MASK_MODE_ == MaskModeT::MASK_CAUSAL) {
                             uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN; // KV 分块的起始下标（闭区间）
                             uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;  // KV 分块的结束下标（开区间）
-                            applyMask = (triUp < kvSEndIdx - 1); // Q 分块首行允许访问的最大 KV 下标 < KV 分块的结束下标
-                            if (applyMask) {
-                                epilogueOnlineSoftmax(
-                                    gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask,
-                                    actualBlockShapeQK, (kvSIdx == 0), qSBlockSize, curStackTileMod, qkReady, triUp,
-                                    kvSStartIdx, kvSEndIdx);
-                            }
-                        }
-
-                        if (!applyMask) {
-                            Arch::CrossCoreWaitFlag(qkReady);
                             epilogueOnlineSoftmax(
-                                gP[gmOffsetP], gS[gmOffsetS], layoutP, layoutS, actualBlockShapeQK, (kvSIdx == 0),
-                                curStackTileMod);
+                                gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask, actualBlockShapeQK,
+                                (kvSIdx == 0), curStackTileMod, curTaskMod, qkReady, qSBlockSize, triUp, kvSStartIdx,
+                                kvSEndIdx);
+                        } else {
+                            epilogueOnlineSoftmax(
+                                gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask, actualBlockShapeQK,
+                                (kvSIdx == 0), curStackTileMod, curTaskMod, qkReady, 0, 0, 0, 0);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }
@@ -399,18 +353,18 @@ public:
                         LayoutLse layoutLse(qHeads, strideLse);
                         LayoutUpdate layoutUpdate = layoutOTmp;
                         uint64_t gmOffsetUpdate = coreIdx * WORKSPACE_BLOCK_SIZE_DB;
-                        epilogueRescaleO.set_curTaskMod(nowTaskMod);
-
-                        Arch::CrossCoreWaitFlag(pvReady);
                         epilogueRescaleO(
                             gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse], layoutO,
                             layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, qSBlockSize, qNBlockSize,
-                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), nowStackTileMod);
+                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), nowStackTileMod, nowTaskMod, pvReady);
                     }
                 }
             }
         }
+    }
 
+    CATLASS_INLINE void PostProcess()
+    {
         if ASCEND_IS_AIC {
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
@@ -433,8 +387,36 @@ public:
         AscendC::PipeBarrier<PIPE_ALL>();
     }
 
+    CATLASS_INLINE void operator()(const FAIKernelParams& params)
+    {
+        PreProcess(params);
+        RunMainLoop();
+        PostProcess();
+    }
+
 private:
-    Arch::Resource<ArchTag> resource;
+    uint32_t coreNum, coreIdx;
+    uint32_t batch, qHeads, kvHeads, embed;
+    uint32_t pagedBlockSize, maxNumBlocksPerBatch, maxQSeqlen;
+
+    AscendC::GlobalTensor<ElementQ> gQ;
+    AscendC::GlobalTensor<ElementK> gK;
+    AscendC::GlobalTensor<ElementV> gV;
+    AscendC::GlobalTensor<ElementMask> gMask;
+    AscendC::GlobalTensor<int32_t> gBlockTable;
+    AscendC::GlobalTensor<int32_t> gActualQseqlen;
+    AscendC::GlobalTensor<int32_t> gActualKvseqlen;
+    AscendC::GlobalTensor<ElementO> gO;
+    AscendC::GlobalTensor<ElementLse> gLse;
+    AscendC::GlobalTensor<ElementS> gS;
+    AscendC::GlobalTensor<ElementP> gP;
+    AscendC::GlobalTensor<ElementOTmp> gOTmp;
+    AscendC::GlobalTensor<ElementOTmp> gOUpdate;
+
+    uint32_t strideQ, strideK, strideV, strideO, strideLse;
+    uint32_t embedRound, groupSize, stackSeqTile;
+
+    Arch::Resource<Arch::AtlasA2> resource;
     uint32_t l1PingPong = 0;
     uint32_t l0ABPingPong = 0;
     uint32_t l0CPingPong = 0;
@@ -449,12 +431,34 @@ private:
     LayoutV layoutVTmp;
     LayoutMask layoutMask;
 
+    uint64_t qBOffset = 0;
+    uint64_t kBOffset = 0;
+    uint64_t vBOffset = 0;
+    uint64_t oBOffset = 0;
+    uint64_t lseBOffset = 0;
+    uint64_t blockBOffset = 0;
+
+    uint32_t preTotalTaskNum = 0;
+    uint32_t curTotalTaskNum = 0;
+    uint32_t curBatch = 0;
+    uint32_t normQSBlockTile, normQSBlockNum, normQNBlockTile, normQNGroupBlockNum, normQNBlockNum, normTaskNum;
+    uint32_t tailQSBlockTile, tailQSBlockNum, tailQNBlockTile, tailQNGroupBlockNum, tailQNBlockNum, tailTaskNum;
+
+    struct TaskInfo {
+        uint32_t kvSIdx, kvSLoop;
+        uint32_t qSeqlen, kvSeqlen, triUp, noSkipKvS;
+        uint64_t gmOffsetQ, gmOffsetK, gmOffsetV, gmOffsetO, gmOffsetLse, gmOffsetBlock;
+        uint32_t qSBlockSize, qNBlockSize, rowNum;
+    };
+    TaskInfo taskInfo[2];
+    uint32_t curTaskMod = 0;
+
     Arch::CrossCoreFlag qkReady{QK_READY_ID};
     Arch::CrossCoreFlag softmaxReady{SOFTMAX_READY_ID};
     Arch::CrossCoreFlag pvReady{PV_READY_ID};
 };
 
-template <typename INPUT_DTYPE_, bool PAGED_CACHE_FLAG_, MaskType MASK_TYPE_, InputLayout INPUT_LAYOUT_>
+template <typename INPUT_DTYPE_, bool PAGED_CACHE_FLAG_, MaskModeT MASK_MODE_, InputLayoutT INPUT_LAYOUT_>
 CATLASS_GLOBAL void FAInfer(
     uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
     GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling)
@@ -492,7 +496,7 @@ CATLASS_GLOBAL void FAInfer(
     using SType = Gemm::GemmType<ElementS, LayoutS>;
     using BlockMmadQK = Gemm::Block::BlockMmad<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, QType, KType, SType>;
 
-    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT;
+    using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueAtlasA2OnlineSoftmaxT<MASK_MODE_>;
     using PType = Gemm::GemmType<ElementP, LayoutP>;
     using MaskType = Gemm::GemmType<ElementMask, LayoutMask>;
     using EpilogueOnlineSoftmax = Epilogue::Block::BlockEpilogue<DispatchPolicyOnlineSoftmax, PType, SType, MaskType>;
@@ -512,7 +516,7 @@ CATLASS_GLOBAL void FAInfer(
         Epilogue::Block::BlockEpilogue<DispatchPolicyRescaleO, OType, OTmpType, OUpdateType, LseType>;
 
     using FAInferKernel = FAInferKernel<
-        BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO, PAGED_CACHE_FLAG_, MASK_TYPE_,
+        BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO, PAGED_CACHE_FLAG_, MASK_MODE_,
         INPUT_LAYOUT_>;
     FAIKernelParams params{q, k, v, mask, blockTables, actualQseqlen, actualKvseqlen, o, lse, workspace, tiling};
     FAInferKernel fAInfer;

@@ -56,12 +56,6 @@ public:
         tv = resource.ubBuf.template GetBufferByByte<float>(TV_OFFSET);
     }
 
-    CATLASS_INLINE void set_curTaskMod(uint32_t curTaskMod)
-    {
-        taskEvent = curTaskMod + 2;
-        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
-    }
-
     CATLASS_INLINE void CopyOToGm(
         const GlobalTensor<ElementOutput>& gOutput, uint32_t rowNum, uint32_t rowOffset, uint32_t qSOffset,
         uint32_t qSBlockSize, uint32_t embed, uint32_t embedRound, uint32_t strideO)
@@ -260,12 +254,13 @@ public:
         SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
 
-    CATLASS_NORMAL void operator()(
+    CATLASS_INLINE void operator()(
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
         const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
         const LayoutLse& layoutLse, GemmCoord actualBlockShape, uint32_t qSBlockSize, uint32_t qNBlockSize,
-        uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod)
+        uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod, uint32_t curTaskMod,
+        Arch::CrossCoreFlag pvReady)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
@@ -278,6 +273,7 @@ public:
         uint32_t coreRow = core1 ? (rowNum - rowSplit) : rowSplit;
 
         if (coreRow == 0) {
+            Arch::CrossCoreWaitFlag(pvReady);
             return;
         }
 
@@ -288,6 +284,10 @@ public:
 
         uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / embedRound);
         uint32_t rowLoop = CeilDiv(coreRow, rowNumTile);
+
+        taskEvent = curTaskMod + 2;
+        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
+        Arch::CrossCoreWaitFlag(pvReady);
 
         for (uint32_t rowIdx = 0; rowIdx < rowLoop; rowIdx++) {
             uint32_t rowOffset = rowIdx * rowNumTile;
