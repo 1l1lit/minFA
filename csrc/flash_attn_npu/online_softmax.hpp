@@ -391,10 +391,6 @@ public:
         uint32_t colStride = layoutOutput.stride(0);
         uint32_t dmOffset = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowOffset;
 
-        if (isFirstStackTile && isFirstRowLoop) {
-            WaitFlag<HardEvent::MTE3_V>(taskEvent); // 等待上个 task 释放临时空间
-        }
-
         CalcLocalRowMax(rowOffset, rowNum, colNum, colNumRound);
         UpdateGlobalRowMax(rowNum, dmOffset, rowOffset, isFirstStackTile);
 
@@ -479,7 +475,6 @@ public:
             }
         }
 
-        taskEvent = curTaskMod + 2;
         taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
         Arch::CrossCoreWaitFlag(qkReady);
 
@@ -536,7 +531,6 @@ public:
 
 private:
     float scaleVal;
-    uint32_t taskEvent;
     uint32_t taskOffset;
 
     uint32_t pingPong = 0;
