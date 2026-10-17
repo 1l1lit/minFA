@@ -35,7 +35,7 @@ public:
     using LayoutUpdate = typename UpdateType_::Layout;
     using LayoutLse = typename LseType_::Layout;
 
-    CATLASS_INLINE void init(Arch::Resource<ArchTag>& resource)
+    CATLASS_DEVICE void init(const Arch::Resource<ArchTag>& resource)
     {
         constexpr uint32_t LO_OFFSET = 6 * UB_BLK_SIZE;
         constexpr uint32_t GO_OFFSET = 8 * UB_BLK_SIZE;
@@ -57,7 +57,7 @@ public:
         tv = resource.ubBuf.template GetBufferByByte<float>(TV_OFFSET);
     }
 
-    CATLASS_INLINE void CopyOToGm(
+    CATLASS_DEVICE void CopyOToGm(
         const GlobalTensor<ElementOutput>& gOutput, uint32_t rowNum, uint32_t rowOffset, uint32_t qSOffset,
         uint32_t qSBlockSize, uint32_t embed, uint32_t embedRound, uint32_t strideO)
     {
@@ -76,7 +76,7 @@ public:
         }
     }
 
-    CATLASS_INLINE void CopyLseToGm(
+    CATLASS_DEVICE void CopyLseToGm(
         const GlobalTensor<ElementLse>& gLse, const GlobalTensor<ElementUpdate>& gUpdate, uint32_t rowNum,
         uint32_t headNum, uint32_t qSOffset, uint32_t qSBlockSize, uint32_t strideLse)
     {
@@ -137,7 +137,7 @@ public:
         }
     }
 
-    CATLASS_INLINE void SubCoreCompute(
+    CATLASS_DEVICE void SubCoreCompute(
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
         const LayoutInput& layoutInput, uint32_t coreRow, uint32_t isFirstStackTile, uint32_t isLastStackTile,
@@ -247,7 +247,7 @@ public:
         SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
 
-    CATLASS_INLINE void operator()(
+    CATLASS_DEVICE void operator()(
         const GlobalTensor<ElementOutput>& gOutput, const GlobalTensor<ElementInput>& gInput,
         const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
         const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,

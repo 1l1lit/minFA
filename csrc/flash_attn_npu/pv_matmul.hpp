@@ -68,11 +68,11 @@ public:
 
     static_assert(std::is_same_v<LayoutC, layout::RowMajor>, "LayoutC only support RowMajor yet!");
 
-    CATLASS_INLINE BlockMmad(uint32_t& l1APingPong_, uint32_t& l0ABPingPong_, uint32_t& l0CPingPong_)
+    CATLASS_DEVICE BlockMmad(uint32_t& l1APingPong_, uint32_t& l0ABPingPong_, uint32_t& l0CPingPong_)
         : l1APingPong(l1APingPong_), l0ABPingPong(l0ABPingPong_), l0CPingPong(l0CPingPong_) {};
 
-    CATLASS_INLINE void init(
-        Arch::Resource<ArchTag>& resource, uint32_t kDyn, uint32_t VStackLen = MAX_KV_STACK_LEN,
+    CATLASS_DEVICE void init(
+        const Arch::Resource<ArchTag>& resource, uint32_t kDyn, uint32_t VStackLen = MAX_KV_STACK_LEN,
         uint32_t l1BufAddrStart = 0)
     {
         maxVStackLen = VStackLen;
@@ -91,7 +91,7 @@ public:
         l1KDynamic = kDyn;
     }
 
-    CATLASS_INLINE void operator()(
+    CATLASS_DEVICE void operator()(
         const AscendC::GlobalTensor<ElementA>& gA, const AscendC::GlobalTensor<ElementB>& gB,
         const AscendC::GlobalTensor<ElementC>& gC, const AscendC::GlobalTensor<int32_t>& gBlockTable,
         const LayoutA& layoutA, const LayoutB& layoutB, const LayoutC& layoutC, GemmCoord actualOriShape, uint32_t nIdx,

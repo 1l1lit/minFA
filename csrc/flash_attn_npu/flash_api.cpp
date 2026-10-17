@@ -1,7 +1,9 @@
-#include <torch/extension.h>
-
+#include "torch/extension.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "third_party/op-plugin/op_plugin/include/ops.h"
+
+#define K_MAX_SHAPE_DIM 0
+
 #include "acl/acl.h"
 #include "runtime/rt_ffts.h"
 #include "kernel_operator.h"
@@ -131,19 +133,18 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
     tiling_cpu_ptr->set_maxQSeqlen(seqlen_q);
 
-    uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
-    uint64_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
-    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
-    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4;
+    uint32_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
+    uint32_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
+    uint32_t mm1OutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint32_t smOnlineOutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
+    uint32_t mm2OutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint32_t UpdateSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
-    tiling_cpu_ptr->set_UpdateSize(UpdateSize);
 
     at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
     at::Tensor softmax_lse =
@@ -268,12 +269,12 @@ std::vector<at::Tensor> mha_fwd(
 
     // set worksapce
     uint32_t coreNum = platform_ascendc::PlatformAscendCManager::GetInstance()->GetCoreNumAic();
-    uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
-    uint64_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
-    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
-    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4;
+    uint32_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
+    uint32_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
+    uint32_t mm1OutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint32_t smOnlineOutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
+    uint32_t mm2OutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint32_t UpdateSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
@@ -292,7 +293,6 @@ std::vector<at::Tensor> mha_fwd(
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
-    tiling_cpu_ptr->set_UpdateSize(UpdateSize);
 
     // device ptrs
     auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
@@ -411,19 +411,18 @@ std::vector<at::Tensor> mha_varlen_fwd(
     tiling_cpu_ptr->set_scaleValue(softmax_scale);
     tiling_cpu_ptr->set_maxQSeqlen(max_seqlen_q);
 
-    uint64_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
-    uint64_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
-    uint64_t mm1OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t smOnlineOutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
-    uint64_t mm2OutSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
-    uint64_t UpdateSize = static_cast<uint64_t>(coreNum) * WORKSPACE_BLOCK_SIZE_DB * 4;
+    uint32_t WORKSPACE_BLOCK_SIZE_DB = KernelCommon::WORKSPACE_BLOCK_SIZE_DB;
+    uint32_t DOUBLE_BUFFER = KernelCommon::DOUBLE_BUFFER;
+    uint32_t mm1OutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint32_t smOnlineOutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 2 * DOUBLE_BUFFER;
+    uint32_t mm2OutSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4 * DOUBLE_BUFFER;
+    uint32_t UpdateSize = coreNum * WORKSPACE_BLOCK_SIZE_DB * 4;
     int64_t workspaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize;
     at::Tensor workspace_tensor = at::empty({workspaceSize}, at::device(at::kPrivateUse1).dtype(at::kByte));
 
     tiling_cpu_ptr->set_mm1OutSize(mm1OutSize);
     tiling_cpu_ptr->set_smOnlineOutSize(smOnlineOutSize);
     tiling_cpu_ptr->set_mm2OutSize(mm2OutSize);
-    tiling_cpu_ptr->set_UpdateSize(UpdateSize);
 
     at::Tensor tiling_npu_tensor = tiling_cpu_tensor.to(at::Device(at::kPrivateUse1));
     at::Tensor softmax_lse = at::empty({num_heads, total_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));

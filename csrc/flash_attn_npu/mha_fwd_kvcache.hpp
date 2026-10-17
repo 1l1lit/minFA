@@ -35,6 +35,8 @@ template <
     MaskModeT MASK_MODE_, InputLayoutT INPUT_LAYOUT_>
 class FAInferKernel {
 public:
+    using ArchTag = Arch::AtlasA2;
+
     using ElementQ = typename BlockMmadQK::ElementA;
     using LayoutQ = typename BlockMmadQK::LayoutA;
     using ElementK = typename BlockMmadQK::ElementB;
@@ -60,12 +62,12 @@ public:
     using ElementUpdate = typename EpilogueRescaleO::ElementUpdate;
     using LayoutUpdate = typename EpilogueRescaleO::LayoutUpdate;
 
-    CATLASS_INLINE void PreProcess(const FAIKernelParams& params)
+    CATLASS_DEVICE void PreProcess(const FAIKernelParams& params, const Arch::Resource<ArchTag>& resource)
     {
         auto fATilingData = reinterpret_cast<__gm__ FAInferTilingData*>(params.tiling);
-        uint64_t mm1OutSize = fATilingData->mm1OutSize;
-        uint64_t smOnlineOutSize = fATilingData->smOnlineOutSize;
-        uint64_t mm2OutSize = fATilingData->mm2OutSize;
+        uint32_t mm1OutSize = fATilingData->mm1OutSize;
+        uint32_t smOnlineOutSize = fATilingData->smOnlineOutSize;
+        uint32_t mm2OutSize = fATilingData->mm2OutSize;
         float scaleValue = fATilingData->scaleValue;
 
         batch = fATilingData->batch;
@@ -77,6 +79,7 @@ public:
         maxQSeqlen = fATilingData->maxQSeqlen;
 
         gQ.SetGlobalBuffer((__gm__ ElementQ*)params.q);
+        gQ.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
         gK.SetGlobalBuffer((__gm__ ElementK*)params.k);
         gV.SetGlobalBuffer((__gm__ ElementV*)params.v);
 
@@ -153,7 +156,7 @@ public:
         }
     }
 
-    CATLASS_NORMAL void RunMainLoop()
+    CATLASS_DEVICE void RunMainLoop()
     {
         uint32_t loopNum = 0;
         uint32_t kvSTail = 0;
@@ -361,7 +364,7 @@ public:
         }
     }
 
-    CATLASS_INLINE void PostProcess()
+    CATLASS_DEVICE void PostProcess()
     {
         if ASCEND_IS_AIC {
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
@@ -383,9 +386,9 @@ public:
         AscendC::PipeBarrier<PIPE_ALL>();
     }
 
-    CATLASS_INLINE void operator()(const FAIKernelParams& params)
+    CATLASS_DEVICE void operator()(const FAIKernelParams& params, const Arch::Resource<ArchTag>& resource)
     {
-        PreProcess(params);
+        PreProcess(params, resource);
         RunMainLoop();
         PostProcess();
     }
@@ -412,7 +415,6 @@ private:
     uint32_t strideQ, strideK, strideV, strideO, strideLse;
     uint32_t embedRound, groupSize, stackSeqTile;
 
-    Arch::Resource<Arch::AtlasA2> resource;
     uint32_t l1PingPong = 0;
     uint32_t l0ABPingPong = 0;
     uint32_t l0CPingPong = 0;
@@ -460,6 +462,9 @@ CATLASS_GLOBAL void FAInfer(
     GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling)
 {
     AscendC::SetSyncBaseAddr(fftsAddr);
+
+    using ArchTag = Arch::AtlasA2;
+    Arch::Resource<ArchTag> resource;
 
     using ElementQ = INPUT_DTYPE_;
     using LayoutQ = layout::RowMajor;
@@ -516,7 +521,7 @@ CATLASS_GLOBAL void FAInfer(
         INPUT_LAYOUT_>;
     FAIKernelParams params{q, k, v, mask, blockTables, actualQseqlen, actualKvseqlen, o, lse, workspace, tiling};
     FAInferKernel fAInfer;
-    fAInfer(params);
+    fAInfer(params, resource);
 }
 
 #endif // MHA_FWD_KVCACHE_HPP
