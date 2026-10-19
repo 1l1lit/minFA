@@ -360,12 +360,13 @@ public:
 
     CATLASS_DEVICE void SubCoreCompute(
         const GlobalTensor<ElementOutput>& gOutput, const LayoutOutput& layoutOutput, uint32_t rowOffset,
-        uint32_t isFirstStackTile, uint32_t isFirstRowLoop, uint32_t colNumRound, uint32_t curStackTileMod)
+        uint32_t isFirstStackTile, uint32_t isFirstRowLoop, uint32_t colNumRound, uint32_t curStackTileMod,
+        uint32_t rowBase)
     {
         uint32_t rowNum = layoutOutput.shape(0);
         uint32_t colNum = layoutOutput.shape(1);
         uint32_t colStride = layoutOutput.stride(0);
-        uint32_t dmOffset = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowOffset;
+        uint32_t dmOffset = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowBase + rowOffset;
 
         CalcLocalRowMax(rowOffset, rowNum, colNum, colNumRound);
         UpdateGlobalRowMax(rowNum, dmOffset, rowOffset, isFirstStackTile);
@@ -398,7 +399,7 @@ public:
         const GlobalTensor<ElementMask>& gMask, const LayoutOutput& layoutOutput, const LayoutInput& layoutInput,
         const LayoutInput& layoutMask, GemmCoord actualBlockShape, uint32_t isFirstStackTile, uint32_t curStackTileMod,
         uint32_t curTaskMod, Arch::CrossCoreFlag qkReady, uint32_t qSBlockSize, uint32_t triUp, uint32_t kvSStartIdx,
-        uint32_t kvSEndIdx)
+        uint32_t kvSEndIdx, uint32_t rowBase = 0, bool isFirstHead = true)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t colNum = actualBlockShape.n();
@@ -410,7 +411,9 @@ public:
         uint32_t coreRow = core1 ? (rowNum - rowSplit) : rowSplit;
 
         if (coreRow == 0) {
-            Arch::CrossCoreWaitFlag(qkReady);
+            if (isFirstHead) {
+                Arch::CrossCoreWaitFlag(qkReady);
+            }
             return;
         }
 
@@ -451,8 +454,10 @@ public:
             }
         }
 
-        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
-        Arch::CrossCoreWaitFlag(qkReady);
+        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE + rowBase;
+        if (isFirstHead) {
+            Arch::CrossCoreWaitFlag(qkReady);
+        }
 
         for (uint32_t rowIdx = 0; rowIdx < rowLoop + PRE_LAUNCH; rowIdx++) {
             uint32_t rowOffset = rowIdx * rowNumTile;
@@ -500,7 +505,7 @@ public:
                 SubCoreCompute(
                     gOutput[layoutOutput.GetOffset(MatrixCoord(rowOffsetActual, 0))],
                     layoutOutput.GetTileLayout(MatrixCoord(rowNumNowLoop, colNum)), nowRowOffset, isFirstStackTile,
-                    (nowRowIdx == 0), colNumRound, curStackTileMod);
+                    (nowRowIdx == 0), colNumRound, curStackTileMod, rowBase);
             }
         }
     }

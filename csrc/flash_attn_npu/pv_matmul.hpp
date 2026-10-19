@@ -96,7 +96,7 @@ public:
         const AscendC::GlobalTensor<ElementA>& gA, const AscendC::GlobalTensor<ElementB>& gB,
         const AscendC::GlobalTensor<ElementC>& gC, const AscendC::GlobalTensor<int32_t>& gBlockTable,
         const LayoutA& layoutA, const LayoutB& layoutB, const LayoutC& layoutC, GemmCoord actualOriShape, uint32_t nIdx,
-        uint32_t blockSize, uint32_t strideV, Arch::CrossCoreFlag softmaxReady)
+        uint32_t blockSize, uint32_t strideV, Arch::CrossCoreFlag softmaxReady, bool isFirstHead = true)
     {
         uint32_t rowNum = actualOriShape.m();
         uint32_t embed = actualOriShape.n();
@@ -149,8 +149,10 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
 
-        // 等待 P 就绪
-        Arch::CrossCoreWaitFlag(softmaxReady);
+        // 等待 P 就绪（head 分块时每个 task 只等一次）
+        if (isFirstHead) {
+            Arch::CrossCoreWaitFlag(softmaxReady);
+        }
 
         uint32_t mL1Loop = CeilDiv<L1TileShape::M>(rowNum);
         uint32_t nL1Loop = CeilDiv<L0TileShape::N>(embed);

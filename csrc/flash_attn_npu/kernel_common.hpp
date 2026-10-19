@@ -57,12 +57,41 @@ struct FAIKernelParams {
     GM_ADDR tiling;
 };
 
-// 获取 Q 的 N 维分块大小
-CATLASS_DEVICE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize)
+// 获取 Q 的 N 维分块大小（N 维以 head 为单位分块，一个 block 内可包含多个 head）
+// 一个 task 内所有 KV 段共享 gl/gm/dm 行状态 buffer（MAX_ROW_NUM_SUB_CORE 行），
+// 因此要求各段行数（含 8 行对齐 pad）之和不超过该上限。
+CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uint32_t nCap)
 {
-    uint32_t qNBlockTile = Q_TILE_CEIL / qSeqlen;
-    qNBlockTile = Min(qNBlockTile, groupSize); // qNBlock 不能跨 group
-    qNBlockTile = Max(qNBlockTile, 1u);        // qNBlock 大小至少为 1
+    // Q 在 L1 中按 16 行对齐存放，整个 task 的 Q 占用 = segs * RoundUp<16>(qS) 行，
+    // 因此 head 数上限应按对齐后的行数折算（原按 qS 折算过于宽松，会切出过大的 tile）
+    uint32_t qSAlign = RoundUp<NUM_16>(qSeqlen);
+    uint32_t qNBlockTile = Min(nCap, Q_TILE_CEIL / qSAlign); // L1 Q 空间 + head 数上限
+    qNBlockTile = Max(qNBlockTile, 1u);
+    // 只覆盖完整的 KV 段：tile >= groupSize 时按 groupSize 对齐（段数 > 1），
+    // 否则取 groupSize 的因子（段数 = 1，head 起点仍在段边界）
+    if (qNBlockTile >= groupSize) {
+        qNBlockTile = (qNBlockTile / groupSize) * groupSize;
+    } else {
+        while (qNBlockTile > 1 && (groupSize % qNBlockTile) != 0) {
+            --qNBlockTile;
+        }
+    }
+    while (qNBlockTile > 1) {
+        uint32_t segN = Min(qNBlockTile, groupSize);
+        uint32_t segs = CeilDiv(qNBlockTile, segN);
+        uint32_t rows = qSeqlen * segN;
+        uint32_t used = (segs - 1) * RoundUp<8>(rows) + rows; // 段间按 8 行对齐（与 segRowStride 一致）
+        if (used <= MAX_ROW_NUM_SUB_CORE) {
+            break;
+        }
+        if (qNBlockTile > groupSize) {
+            qNBlockTile -= groupSize; // 保持段对齐
+        } else {
+            do {
+                --qNBlockTile;
+            } while (qNBlockTile > 1 && (groupSize % qNBlockTile) != 0);
+        }
+    }
     return qNBlockTile;
 }
 

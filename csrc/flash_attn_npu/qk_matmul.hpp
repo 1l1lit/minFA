@@ -94,7 +94,7 @@ public:
 
     CATLASS_DEVICE void loadQGM(
         const AscendC::GlobalTensor<ElementA>& gA, const LayoutA& layoutA, uint32_t qSBlockSize, uint32_t qNBlockSize,
-        uint32_t strideQ)
+        uint32_t strideQ, uint32_t l1QElemOffset = 0, bool isFirstHead = true, bool isLastHead = true)
     {
         // Q: (S * N, D)
         uint32_t rowNum = layoutA.shape(0);
@@ -105,10 +105,12 @@ public:
         auto layoutASingleNd = layoutA.GetTileLayout(MakeCoord(qNBlockSize, embed));
         LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(rowNum, embed);
 
-        AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
-            EVENT_ID2); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
+        if (isFirstHead) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(
+                EVENT_ID2); // 等待上一轮 L1 -> L0 搬运完成，再进行 GM -> L1 搬运
+        }
         copyGmToL1A(
-            l1ATensor,       // dstTensor
+            l1ATensor[l1QElemOffset], // dstTensor
             gA,              // srcTensor
             layoutAInL1,     // layoutDst
             layoutASingleNd, // layoutSrc
@@ -117,14 +119,17 @@ public:
             qSBlockSize,     // dstNzNStride
             NUM_16,          // dstNzMatrixStride
             rowNumRound);    // dstNzC0Stride
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
+        if (isLastHead) { // 所有 head 的 Q 都搬完后统一同步一次，减少 scalar 开销
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID2);
+        }
     }
 
     CATLASS_DEVICE void operator()(
         const AscendC::GlobalTensor<ElementB>& gB, const AscendC::GlobalTensor<ElementC>& gC,
         const AscendC::GlobalTensor<int32_t>& gBlockTable, const LayoutB& layoutB, const LayoutC& layoutC,
-        GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideK, uint32_t isLastStackTile)
+        GemmCoord actualOriShape, uint32_t nIdx, uint32_t blockSize, uint32_t strideK, uint32_t isLastStackTile,
+        uint32_t l1QElemOffset = 0)
     {
         uint32_t rowNum = actualOriShape.m();
         uint32_t stackSeqTile = actualOriShape.n();
@@ -193,7 +198,7 @@ public:
                     // Q: L1 -> L0
                     LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mL0Actual, kL0Actual);
                     MatrixCoord l1ATileCoord{mL0Idx * L0TileShape::M, kL0Idx * L0TileShape::K};
-                    auto l1ATile = l1ATensor[layoutAInL1.GetOffset(l1ATileCoord)];
+                    auto l1ATile = l1ATensor[l1QElemOffset + layoutAInL1.GetOffset(l1ATileCoord)];
                     copyL1ToL0A(
                         l0ATensor[l0ABPingPong], // dstTensor
                         l1ATile,                 // srcTensor

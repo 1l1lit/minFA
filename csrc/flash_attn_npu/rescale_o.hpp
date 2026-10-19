@@ -142,12 +142,13 @@ public:
         const GlobalTensor<ElementUpdate>& gUpdate, const GlobalTensor<ElementLse>& gLse,
         const LayoutInput& layoutInput, uint32_t coreRow, uint32_t isFirstStackTile, uint32_t isLastStackTile,
         uint32_t curStackTileMod, uint32_t multipleRowLoop, uint32_t isLastRowLoop, uint32_t rowOffset,
-        uint32_t qSBlockSize, uint32_t qSOffset, uint32_t coreHeadNum, uint32_t strideLse, uint32_t strideO)
+        uint32_t qSBlockSize, uint32_t qSOffset, uint32_t coreHeadNum, uint32_t strideLse, uint32_t strideO,
+        uint32_t rowBase)
     {
         uint32_t rowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
         uint32_t embedRound = layoutInput.stride(0);
-        uint32_t dmOffset = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowOffset;
+        uint32_t dmOffset = curStackTileMod * MAX_ROW_NUM_SUB_CORE + rowBase + rowOffset;
 
         if (isFirstStackTile) {
             // go = lo
@@ -253,7 +254,7 @@ public:
         const LayoutOutput& layoutOutput, const LayoutInput& layoutInput, const LayoutUpdate& layoutUpdate,
         const LayoutLse& layoutLse, GemmCoord actualBlockShape, uint32_t qSBlockSize, uint32_t qNBlockSize,
         uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod, uint32_t curTaskMod,
-        Arch::CrossCoreFlag pvReady)
+        Arch::CrossCoreFlag pvReady, uint32_t rowBase = 0, bool isFirstHead = true)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
@@ -266,7 +267,9 @@ public:
         uint32_t coreRow = core1 ? (rowNum - rowSplit) : rowSplit;
 
         if (coreRow == 0) {
-            Arch::CrossCoreWaitFlag(pvReady);
+            if (isFirstHead) {
+                Arch::CrossCoreWaitFlag(pvReady);
+            }
             return;
         }
 
@@ -278,8 +281,10 @@ public:
         uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / embedRound);
         uint32_t rowLoop = CeilDiv(coreRow, rowNumTile);
 
-        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE;
-        Arch::CrossCoreWaitFlag(pvReady);
+        taskOffset = curTaskMod * MAX_ROW_NUM_SUB_CORE + rowBase;
+        if (isFirstHead) {
+            Arch::CrossCoreWaitFlag(pvReady);
+        }
 
         for (uint32_t rowIdx = 0; rowIdx < rowLoop; rowIdx++) {
             uint32_t rowOffset = rowIdx * rowNumTile;
@@ -293,7 +298,7 @@ public:
                 gLse[layoutLse.GetOffset(MatrixCoord(coreQNOffset, qSOffset))],
                 layoutInput.GetTileLayout(MatrixCoord(rowNumCurLoop, embed)), coreRow, isFirstStackTile,
                 isLastStackTile, curStackTileMod, (rowLoop > 1), (rowIdx == rowLoop - 1), rowOffset, qSBlockSize,
-                qSOffset, coreHeadNum, strideLse, strideO);
+                qSOffset, coreHeadNum, strideLse, strideO, rowBase);
         }
     }
 

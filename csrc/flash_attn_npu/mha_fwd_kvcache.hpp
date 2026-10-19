@@ -154,6 +154,18 @@ public:
         } else {
             coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
         }
+
+        // N 方向（head）合并上限：任务数足够多时，把多个 head 合到一个 task 中，
+        // 从而成倍减少 task 数与跨核握手次数；batch 不足或 paged 场景保持原行为。
+        // tile 的具体大小由 GetQNBlockTile 按"行状态 buffer 容量 + KV 段对齐"统一决定：
+        // GQA 段内 head 共享 K/V，整段合并成一个大 GEMM（每段只占一份行状态）；
+        // MHA 每段只有 1 个 head，每个 head 都要独占 RoundUp<8>(qS) 行行状态，
+        // 于是容量自然把 tile 压到 128/RoundUp<8>(qS)（s=3 时为 16）。
+        if constexpr (PAGED_CACHE_FLAG_) {
+            qNCap = groupSize;
+        } else {
+            qNCap = (batch >= coreNum) ? qHeads : groupSize;
+        }
     }
 
     CATLASS_DEVICE void RunMainLoop()
@@ -177,6 +189,17 @@ public:
             uint32_t& qSBlockSize = curTask.qSBlockSize;
             uint32_t& qNBlockSize = curTask.qNBlockSize;
             uint32_t& rowNum = curTask.rowNum;
+            uint32_t& sRowPad = curTask.sRowPad;
+            uint32_t& qNHeadStart = curTask.qNHeadStart;
+            uint32_t& headInGroup = curTask.headInGroup;
+            uint32_t& kvHeadBase = curTask.kvHeadBase;
+            uint32_t& segN = curTask.segN;
+            uint32_t& segNum = curTask.segNum;
+            uint32_t& segRows = curTask.segRows;
+            uint32_t& segRowStride = curTask.segRowStride;
+            uint32_t& segL1Stride = curTask.segL1Stride;
+            uint32_t& segSStride = curTask.segSStride;
+            uint32_t& segOStride = curTask.segOStride;
 
             TaskInfo& preTask = taskInfo[curTaskMod ^ 1];
             qSeqlen = preTask.qSeqlen;
@@ -211,17 +234,17 @@ public:
                 normQSBlockTile = GetQSBlockTile();
                 normQSBlockNum = qSeqlen / normQSBlockTile;
                 if (normQSBlockNum > 0) {
-                    normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
-                    normQNGroupBlockNum = CeilDiv(groupSize, normQNBlockTile);
-                    normQNBlockNum = normQNGroupBlockNum * kvHeads;
+                    normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize, qNCap);
+                    normQNGroupBlockNum = 1;
+                    normQNBlockNum = CeilDiv(qHeads, normQNBlockTile);
                 }
 
                 tailQSBlockTile = qSeqlen % normQSBlockTile;
                 if (tailQSBlockTile > 0) {
                     tailQSBlockNum = 1;
-                    tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize);
-                    tailQNGroupBlockNum = CeilDiv(groupSize, tailQNBlockTile);
-                    tailQNBlockNum = tailQNGroupBlockNum * kvHeads;
+                    tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize, qNCap);
+                    tailQNGroupBlockNum = 1;
+                    tailQNBlockNum = CeilDiv(qHeads, tailQNBlockTile);
                 } else {
                     tailQSBlockNum = 0;
                 }
@@ -236,25 +259,35 @@ public:
                 uint32_t curTaskIdx = taskIdx - preTotalTaskNum;
                 bool tailTask = (curTaskIdx >= normTaskNum);
                 uint32_t& qNBlockTile = tailTask ? tailQNBlockTile : normQNBlockTile;
-                uint32_t& qNGroupBlockNum = tailTask ? tailQNGroupBlockNum : normQNGroupBlockNum;
 
                 uint32_t qSStartIdx =
                     tailTask ? (qSeqlen - tailQSBlockTile) : ((curTaskIdx / normQNBlockNum) * normQSBlockTile);
                 uint32_t qNBlockIdx = tailTask ? (curTaskIdx - normTaskNum) : (curTaskIdx % normQNBlockNum);
-                uint32_t qNGroupBlockIdx = qNBlockIdx % qNGroupBlockNum;
-                uint32_t kvNIdx = qNBlockIdx / qNGroupBlockNum;
-                uint32_t qNStartIdx = kvNIdx * groupSize + qNGroupBlockIdx * qNBlockTile;
 
+                qNHeadStart = qNBlockIdx * qNBlockTile;              // 本 task 覆盖的 head 起点（绝对下标）
                 qSBlockSize = tailTask ? tailQSBlockTile : normQSBlockTile;
-                qNBlockSize = (qNGroupBlockIdx == qNGroupBlockNum - 1) ? (groupSize - qNGroupBlockIdx * qNBlockTile)
-                                                                       : qNBlockTile;
-                rowNum = qSBlockSize * qNBlockSize;
+                qNBlockSize = Min(qNBlockTile, qHeads - qNHeadStart); // 本 task 覆盖的 head 数
+                rowNum = qSBlockSize * qNBlockSize;                   // 多个 head 的 Q 行拼成连续的 rowNum 行
+                sRowPad = 0;                                          // 段内整块 flat 处理，不再需要 per-head 行 pad
+                headInGroup = qNHeadStart % groupSize;
+                kvHeadBase = qNHeadStart / groupSize;
 
-                gmOffsetQ = qBOffset + qSStartIdx * strideQ + qNStartIdx * embed;
-                gmOffsetK = kBOffset + kvNIdx * embed;
-                gmOffsetV = vBOffset + kvNIdx * embed;
-                gmOffsetO = oBOffset + qSStartIdx * strideO + qNStartIdx * embed;
-                gmOffsetLse = lseBOffset + qNStartIdx * strideLse + qSStartIdx;
+                // 统一段划分：GetQNBlockTile 保证 head 起点落在 KV 段边界（tile 为 groupSize
+                // 的倍数或其因子），因此一个 task 内各段 head 数/行数/各 buffer 步长都是常量，
+                // 段内循环只需 segIdx * 步长，避免每段重算 Layout/GemmCoord 的 scalar 开销。
+                segN = Min(qNBlockSize, groupSize);             // 每段 head 数
+                segNum = CeilDiv(qNBlockSize, segN);            // 段数
+                segRows = qSBlockSize * segN;                   // 每段 Q 行数
+                segRowStride = RoundUp<8>(segRows);             // gl/gm/dm 行状态步长（8 行对齐，省行状态容量）
+                segL1Stride = RoundUp<NUM_16>(segRows) * embed; // L1 中 Q 步长（16 行对齐）
+                segSStride = segRows * MAX_KV_STACK_LEN;        // S/P workspace 步长
+                segOStride = segRows * embedRound;              // O_tmp workspace 步长
+
+                gmOffsetQ = qBOffset + qSStartIdx * strideQ + qNHeadStart * embed;
+                gmOffsetK = kBOffset + kvHeadBase * embed;
+                gmOffsetV = vBOffset + kvHeadBase * embed;
+                gmOffsetO = oBOffset + qSStartIdx * strideO + qNHeadStart * embed;
+                gmOffsetLse = lseBOffset + qNHeadStart * strideLse + qSStartIdx;
                 gmOffsetBlock = blockBOffset;
 
                 if constexpr (MASK_MODE_ == MaskModeT::MASK_CAUSAL) {
@@ -269,8 +302,13 @@ public:
                 kvSLoop = CeilDiv<MAX_KV_STACK_LEN>(noSkipKvS); // task 的 KV 循环分块数目
 
                 if ASCEND_IS_AIC {
-                    layoutQTmp = LayoutQ(rowNum, embed);
-                    blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTmp, qSBlockSize, qNBlockSize, strideQ);
+                    // 每个 KV 段一次连续搬运：[qSBlockSize, segN, embed]，段间在 L1 中按 16 行对齐
+                    layoutQTmp = LayoutQ(segRows, embed);
+                    for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
+                        blockMmadQK.loadQGM(
+                            gQ[gmOffsetQ + segIdx * segN * embed], layoutQTmp, qSBlockSize, segN, strideQ,
+                            segIdx * segL1Stride, (segIdx == 0), (segIdx == segNum - 1));
+                    }
                 }
             } else {
                 kvSLoop = 0;
@@ -287,28 +325,41 @@ public:
                     }
                     uint32_t curStackTileMod = loopNum % DOUBLE_BUFFER;
                     uint64_t gmOffsetS = (coreIdx * DOUBLE_BUFFER + curStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
-                    GemmCoord actualBlockShapeQK{rowNum, stackSeqTile, embed};
-                    LayoutS layoutS(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
-
                     if ASCEND_IS_AIC {
-                        blockMmadQK(
-                            gK[gmOffsetK], gS[gmOffsetS], gBlockTable[gmOffsetBlock], layoutKTmp, layoutS,
-                            actualBlockShapeQK, kvSIdx, pagedBlockSize, strideK, (kvSIdx == kvSLoop - 1));
+                        // 按 KV 段做 QK：同一段内所有 head 共享同一份 K，整体作为一个大 GEMM
+                        LayoutS layoutS(segRows, stackSeqTile, MAX_KV_STACK_LEN);
+                        GemmCoord shapeQK{segRows, stackSeqTile, embed};
+                        for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
+                            blockMmadQK(
+                                gK[gmOffsetK + segIdx * embed], gS[gmOffsetS + segIdx * segSStride],
+                                gBlockTable[gmOffsetBlock], layoutKTmp, layoutS, shapeQK, kvSIdx, pagedBlockSize,
+                                strideK, (kvSIdx == kvSLoop - 1) && (segIdx == segNum - 1),
+                                segIdx * segL1Stride);
+                        }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
+                        // 按 KV 段做 online softmax：段内行序为 head-major，与 rescale 的行划分一致
+                        LayoutS layoutS(segRows, stackSeqTile, MAX_KV_STACK_LEN);
                         LayoutP layoutP = layoutS;
-                        uint64_t gmOffsetP = gmOffsetS;
+                        GemmCoord shapeQK{segRows, stackSeqTile, embed};
                         if constexpr (MASK_MODE_ == MaskModeT::MASK_CAUSAL) {
                             uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN; // KV 分块的起始下标（闭区间）
                             uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;  // KV 分块的结束下标（开区间）
-                            epilogueOnlineSoftmax(
-                                gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask, actualBlockShapeQK,
-                                (kvSIdx == 0), curStackTileMod, curTaskMod, qkReady, qSBlockSize, triUp, kvSStartIdx,
-                                kvSEndIdx);
+                            for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
+                                epilogueOnlineSoftmax(
+                                    gP[gmOffsetS + segIdx * segSStride], gS[gmOffsetS + segIdx * segSStride],
+                                    gMask, layoutP, layoutS, layoutMask, shapeQK, (kvSIdx == 0), curStackTileMod,
+                                    curTaskMod, qkReady, qSBlockSize, triUp, kvSStartIdx, kvSEndIdx,
+                                    segIdx * segRowStride, (segIdx == 0));
+                            }
                         } else {
-                            epilogueOnlineSoftmax(
-                                gP[gmOffsetP], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask, actualBlockShapeQK,
-                                (kvSIdx == 0), curStackTileMod, curTaskMod, qkReady, 0, 0, 0, 0);
+                            for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
+                                epilogueOnlineSoftmax(
+                                    gP[gmOffsetS + segIdx * segSStride], gS[gmOffsetS + segIdx * segSStride],
+                                    gMask, layoutP, layoutS, layoutMask, shapeQK, (kvSIdx == 0), curStackTileMod,
+                                    curTaskMod, qkReady, qSBlockSize, 0, 0, 0, segIdx * segRowStride,
+                                    (segIdx == 0));
+                            }
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }
@@ -330,6 +381,14 @@ public:
                     uint32_t& qNBlockSize = nowTask.qNBlockSize;
                     uint32_t& rowNum = nowTask.rowNum;
 
+                    uint32_t& headInGroup = nowTask.headInGroup;
+                    uint32_t& segN = nowTask.segN;
+                    uint32_t& segNum = nowTask.segNum;
+                    uint32_t& segRows = nowTask.segRows;
+                    uint32_t& segRowStride = nowTask.segRowStride;
+                    uint32_t& segSStride = nowTask.segSStride;
+                    uint32_t& segOStride = nowTask.segOStride;
+
                     uint32_t nowKvSIdx = kvSIdx - PRE_LAUNCH;
                     if (nowKvSIdx == kvSLoop - 1) {
                         stackSeqTile = noSkipKvS - nowKvSIdx * MAX_KV_STACK_LEN;
@@ -338,26 +397,34 @@ public:
                     }
                     uint32_t nowStackTileMod = (loopNum - PRE_LAUNCH) % DOUBLE_BUFFER;
                     uint64_t gmOffsetOTmp = (coreIdx * DOUBLE_BUFFER + nowStackTileMod) * WORKSPACE_BLOCK_SIZE_DB;
-                    GemmCoord actualBlockShapePV{rowNum, embed, stackSeqTile};
-                    LayoutOTmp layoutOTmp(rowNum, embed, embedRound);
 
                     if ASCEND_IS_AIC {
-                        LayoutP layoutP(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
-                        uint64_t gmOffsetP = gmOffsetOTmp;
-                        blockMmadPV(
-                            gP[gmOffsetP], gV[gmOffsetV], gOTmp[gmOffsetOTmp], gBlockTable[gmOffsetBlock], layoutP,
-                            layoutVTmp, layoutOTmp, actualBlockShapePV, nowKvSIdx, pagedBlockSize, strideV,
-                            softmaxReady);
+                        LayoutP layoutP(segRows, stackSeqTile, MAX_KV_STACK_LEN);
+                        LayoutOTmp layoutOTmp(segRows, embed, embedRound);
+                        GemmCoord shapePV{segRows, embed, stackSeqTile};
+                        for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
+                            blockMmadPV(
+                                gP[gmOffsetOTmp + segIdx * segSStride], gV[gmOffsetV + segIdx * embed],
+                                gOTmp[gmOffsetOTmp + segIdx * segOStride], gBlockTable[gmOffsetBlock], layoutP,
+                                layoutVTmp, layoutOTmp, shapePV, nowKvSIdx, pagedBlockSize, strideV,
+                                softmaxReady, (segIdx == 0));
+                        }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(pvReady);
                     } else { // ASCEND_IS_AIV
                         LayoutO layoutO(qSeqlen, strideO);
                         LayoutLse layoutLse(qHeads, strideLse);
-                        LayoutUpdate layoutUpdate = layoutOTmp;
                         uint64_t gmOffsetUpdate = coreIdx * WORKSPACE_BLOCK_SIZE_DB;
-                        epilogueRescaleO(
-                            gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse], layoutO,
-                            layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, qSBlockSize, qNBlockSize,
-                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), nowStackTileMod, nowTaskMod, pvReady);
+                        LayoutOTmp layoutOTmp(segRows, embed, embedRound);
+                        LayoutUpdate layoutUpdate = layoutOTmp;
+                        GemmCoord shapePV{segRows, embed, stackSeqTile};
+                        for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
+                            epilogueRescaleO(
+                                gO[gmOffsetO + segIdx * segN * embed], gOTmp[gmOffsetOTmp + segIdx * segOStride],
+                                gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse + segIdx * segN * strideLse], layoutO,
+                                layoutOTmp, layoutUpdate, layoutLse, shapePV, qSBlockSize, segN,
+                                (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), nowStackTileMod, nowTaskMod, pvReady,
+                                segIdx * segRowStride, (segIdx == 0));
+                        }
                     }
                 }
             }
@@ -414,6 +481,7 @@ private:
 
     uint32_t strideQ, strideK, strideV, strideO, strideLse;
     uint32_t embedRound, groupSize, stackSeqTile;
+    uint32_t qNCap = 1;
 
     uint32_t l1PingPong = 0;
     uint32_t l0ABPingPong = 0;
@@ -446,7 +514,10 @@ private:
         uint32_t kvSIdx, kvSLoop;
         uint32_t qSeqlen, kvSeqlen, triUp, noSkipKvS;
         uint64_t gmOffsetQ, gmOffsetK, gmOffsetV, gmOffsetO, gmOffsetLse, gmOffsetBlock;
-        uint32_t qSBlockSize, qNBlockSize, rowNum;
+        uint32_t qSBlockSize, qNBlockSize, rowNum, sRowPad;
+        uint32_t qNHeadStart, headInGroup, kvHeadBase;   // head 分块信息
+        // 统一 KV 段划分（一个 task 内为常量，段内循环只做乘法）
+        uint32_t segN, segNum, segRows, segRowStride, segL1Stride, segSStride, segOStride;
     };
     TaskInfo taskInfo[2];
     uint32_t curTaskMod = 0;
