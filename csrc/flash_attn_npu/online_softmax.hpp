@@ -169,7 +169,8 @@ public:
         }
 
         // gm = hm
-        DataCopy(gm[taskOffset][rowOffset], hm[rowOffset], DataCopyParams(1, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 0));
+        DataCopy(gm[taskOffset][rowOffset], hm[rowOffset],
+                 DataCopyParams(1, CeilDiv<FLT_PER_DATABLOCK>(rowNum), 0, 0));
         PipeBarrier<PIPE_V>();
     }
 

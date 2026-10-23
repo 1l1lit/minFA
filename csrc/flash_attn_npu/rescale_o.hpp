@@ -273,10 +273,13 @@ public:
             return;
         }
 
+        // 行在 S/O 里是 head-major 连续排布（行 r -> head r/qSBlockSize、q 偏移 r%qSBlockSize），
+        // 因此子核的 head 起点/head 内偏移由起始行直接换算；head 数为奇数时两子核会在
+        // head 中间切开，CopyOToGm/CopyLseToGm 已支持跨 head/半个 head 的连续写。
         uint32_t coreRowOffset = core1 ? rowSplit : 0;
-        uint32_t qSOffset = core1 ? (rowSplit % qSBlockSize) : 0;
-        uint32_t coreQNOffset = core1 ? (qNBlockSize / NUM_2) : 0;
-        uint32_t coreHeadNum = CeilDiv<NUM_2>(qNBlockSize);
+        uint32_t qSOffset = coreRowOffset % qSBlockSize;
+        uint32_t coreQNOffset = coreRowOffset / qSBlockSize;
+        uint32_t coreHeadNum = CeilDiv(coreRow, qSBlockSize);
 
         uint32_t rowNumTile = RoundDown<FLT_PER_DATABLOCK>(MAX_UB_ELEM_NUM / embedRound);
         uint32_t rowLoop = CeilDiv(coreRow, rowNumTile);

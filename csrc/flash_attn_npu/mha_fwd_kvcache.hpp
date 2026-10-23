@@ -168,7 +168,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE void RunMainLoop()
+    CATLASS_INLINE void RunMainLoop()
     {
         uint32_t loopNum = 0;
         uint32_t kvSTail = 0;
@@ -234,7 +234,7 @@ public:
                 normQSBlockTile = GetQSBlockTile();
                 normQSBlockNum = qSeqlen / normQSBlockTile;
                 if (normQSBlockNum > 0) {
-                    normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize, qNCap);
+                    normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize, qNCap, qHeads);
                     normQNGroupBlockNum = 1;
                     normQNBlockNum = CeilDiv(qHeads, normQNBlockTile);
                 }
@@ -242,7 +242,7 @@ public:
                 tailQSBlockTile = qSeqlen % normQSBlockTile;
                 if (tailQSBlockTile > 0) {
                     tailQSBlockNum = 1;
-                    tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize, qNCap);
+                    tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize, qNCap, qHeads);
                     tailQNGroupBlockNum = 1;
                     tailQNBlockNum = CeilDiv(qHeads, tailQNBlockTile);
                 } else {
@@ -273,12 +273,12 @@ public:
                 kvHeadBase = qNHeadStart / groupSize;
 
                 // 统一段划分：GetQNBlockTile 保证 head 起点落在 KV 段边界（tile 为 groupSize
-                // 的倍数或其因子），因此一个 task 内各段 head 数/行数/各 buffer 步长都是常量，
-                // 段内循环只需 segIdx * 步长，避免每段重算 Layout/GemmCoord 的 scalar 开销。
+                // 的倍数或其因子），因此一个 task 内各段 head 数/行数/各 buffer 步长都是常量。
+                // 行状态按紧凑行布局：段 s 的行状态紧接段 s-1，AIV 侧可把全部段的行当成一块处理。
                 segN = Min(qNBlockSize, groupSize);             // 每段 head 数
                 segNum = CeilDiv(qNBlockSize, segN);            // 段数
                 segRows = qSBlockSize * segN;                   // 每段 Q 行数
-                segRowStride = RoundUp<8>(segRows);             // gl/gm/dm 行状态步长（8 行对齐，省行状态容量）
+                segRowStride = segRows;                         // gl/gm/dm 行状态步长（紧凑，无 pad）
                 segL1Stride = RoundUp<NUM_16>(segRows) * embed; // L1 中 Q 步长（16 行对齐）
                 segSStride = segRows * MAX_KV_STACK_LEN;        // S/P workspace 步长
                 segOStride = segRows * embedRound;              // O_tmp workspace 步长
@@ -338,28 +338,22 @@ public:
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(qkReady);
                     } else { // ASCEND_IS_AIV
-                        // 按 KV 段做 online softmax：段内行序为 head-major，与 rescale 的行划分一致
-                        LayoutS layoutS(segRows, stackSeqTile, MAX_KV_STACK_LEN);
+                        // online softmax 是逐行独立的：一个 task 内所有段（head/group）的 S
+                        // 在 workspace 里紧凑连续，直接拼成 rowNum 行一次算完，不再按段循环。
+                        LayoutS layoutS(rowNum, stackSeqTile, MAX_KV_STACK_LEN);
                         LayoutP layoutP = layoutS;
-                        GemmCoord shapeQK{segRows, stackSeqTile, embed};
+                        GemmCoord shapeQK{rowNum, stackSeqTile, embed};
                         if constexpr (MASK_MODE_ == MaskModeT::MASK_CAUSAL) {
                             uint32_t kvSStartIdx = kvSIdx * MAX_KV_STACK_LEN; // KV 分块的起始下标（闭区间）
                             uint32_t kvSEndIdx = kvSStartIdx + stackSeqTile;  // KV 分块的结束下标（开区间）
-                            for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
-                                epilogueOnlineSoftmax(
-                                    gP[gmOffsetS + segIdx * segSStride], gS[gmOffsetS + segIdx * segSStride],
-                                    gMask, layoutP, layoutS, layoutMask, shapeQK, (kvSIdx == 0), curStackTileMod,
-                                    curTaskMod, qkReady, qSBlockSize, triUp, kvSStartIdx, kvSEndIdx,
-                                    segIdx * segRowStride, (segIdx == 0));
-                            }
+                            epilogueOnlineSoftmax(
+                                gP[gmOffsetS], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask, shapeQK,
+                                (kvSIdx == 0), curStackTileMod, curTaskMod, qkReady, qSBlockSize, triUp,
+                                kvSStartIdx, kvSEndIdx, 0, true);
                         } else {
-                            for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
-                                epilogueOnlineSoftmax(
-                                    gP[gmOffsetS + segIdx * segSStride], gS[gmOffsetS + segIdx * segSStride],
-                                    gMask, layoutP, layoutS, layoutMask, shapeQK, (kvSIdx == 0), curStackTileMod,
-                                    curTaskMod, qkReady, qSBlockSize, 0, 0, 0, segIdx * segRowStride,
-                                    (segIdx == 0));
-                            }
+                            epilogueOnlineSoftmax(
+                                gP[gmOffsetS], gS[gmOffsetS], gMask, layoutP, layoutS, layoutMask, shapeQK,
+                                (kvSIdx == 0), curStackTileMod, curTaskMod, qkReady, qSBlockSize, 0, 0, 0, 0, true);
                         }
                         Arch::CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(softmaxReady);
                     }
@@ -414,17 +408,17 @@ public:
                         LayoutO layoutO(qSeqlen, strideO);
                         LayoutLse layoutLse(qHeads, strideLse);
                         uint64_t gmOffsetUpdate = coreIdx * WORKSPACE_BLOCK_SIZE_DB;
-                        LayoutOTmp layoutOTmp(segRows, embed, embedRound);
+                        // 与 softmax 一致：所有段的行紧凑拼接，rescale/O 累加一次算完。
+                        // O/LSE 的 GM 目标按行 head-major 展开，CopyOToGm/CopyLseToGm 内部
+                        // 用 qSBlockSize 折行，可跨 head 连续写。
+                        LayoutOTmp layoutOTmp(rowNum, embed, embedRound);
                         LayoutUpdate layoutUpdate = layoutOTmp;
-                        GemmCoord shapePV{segRows, embed, stackSeqTile};
-                        for (uint32_t segIdx = 0; segIdx < segNum; ++segIdx) {
-                            epilogueRescaleO(
-                                gO[gmOffsetO + segIdx * segN * embed], gOTmp[gmOffsetOTmp + segIdx * segOStride],
-                                gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse + segIdx * segN * strideLse], layoutO,
-                                layoutOTmp, layoutUpdate, layoutLse, shapePV, qSBlockSize, segN,
-                                (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), nowStackTileMod, nowTaskMod, pvReady,
-                                segIdx * segRowStride, (segIdx == 0));
-                        }
+                        GemmCoord shapePV{rowNum, embed, stackSeqTile};
+                        epilogueRescaleO(
+                            gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[gmOffsetLse],
+                            layoutO, layoutOTmp, layoutUpdate, layoutLse, shapePV, qSBlockSize, qNBlockSize,
+                            (nowKvSIdx == 0), (nowKvSIdx == kvSLoop - 1), nowStackTileMod, nowTaskMod, pvReady,
+                            0, true);
                     }
                 }
             }

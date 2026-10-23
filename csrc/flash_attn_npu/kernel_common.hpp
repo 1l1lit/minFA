@@ -59,8 +59,9 @@ struct FAIKernelParams {
 
 // 获取 Q 的 N 维分块大小（N 维以 head 为单位分块，一个 block 内可包含多个 head）
 // 一个 task 内所有 KV 段共享 gl/gm/dm 行状态 buffer（MAX_ROW_NUM_SUB_CORE 行），
-// 因此要求各段行数（含 8 行对齐 pad）之和不超过该上限。
-CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uint32_t nCap)
+// 因此要求所有段的行数之和不超过该上限。行状态按紧凑行布局（段间无 pad），
+// 这样 AIV 侧可以把所有段的行拼成一块，对 softmax/rescale 只调用一次。
+CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uint32_t nCap, uint32_t qHeads)
 {
     // Q 在 L1 中按 16 行对齐存放，整个 task 的 Q 占用 = segs * RoundUp<16>(qS) 行，
     // 因此 head 数上限应按对齐后的行数折算（原按 qS 折算过于宽松，会切出过大的 tile）
@@ -80,7 +81,8 @@ CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uin
         uint32_t segN = Min(qNBlockTile, groupSize);
         uint32_t segs = CeilDiv(qNBlockTile, segN);
         uint32_t rows = qSeqlen * segN;
-        uint32_t used = (segs - 1) * RoundUp<8>(rows) + rows; // 段间按 8 行对齐（与 segRowStride 一致）
+        // 段间紧凑排列：行状态总行数 = 总 head 数 * qSeqlen，无对齐 pad
+        uint32_t used = segs * rows;
         if (used <= MAX_ROW_NUM_SUB_CORE) {
             break;
         }
@@ -90,6 +92,22 @@ CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uin
             do {
                 --qNBlockTile;
             } while (qNBlockTile > 1 && (groupSize % qNBlockTile) != 0);
+        }
+    }
+    // head 数在 task 间均分：task 按 taskIdx += coreNum 轮转，coreNum 为偶数时同一 core
+    // 始终拿到同一类 task（taskIdx 奇偶固定），因此 CeilDiv 切出的"大 tile + 小尾巴"
+    // 会直接变成核间耗时差（实测 16 head 切成 14+2 时 AIC 524us vs 141us，整核耗时由
+    // 慢核决定）。这里把 tile 调成 CeilDiv(qHeads, tileNum) 的均分大小，task 数不变，
+    // 只把各 task 的 head 数拉平；bal < tile 保证行状态容量不会变大。
+    if (qNBlockTile >= groupSize && groupSize > 0 && (qNBlockTile % groupSize) == 0) {
+        uint32_t kvHeads = qHeads / groupSize;
+        uint32_t mCap = qNBlockTile / groupSize; // 每 task 覆盖的 KV 段（group）数上限
+        if (kvHeads > mCap) {
+            uint32_t tileNum = CeilDiv(kvHeads, mCap);
+            uint32_t mBal = CeilDiv(kvHeads, tileNum) * groupSize;
+            if (mBal < qNBlockTile) {
+                qNBlockTile = mBal;
+            }
         }
     }
     return qNBlockTile;
