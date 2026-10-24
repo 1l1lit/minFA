@@ -18,6 +18,7 @@
 
 #include "fa_block.hpp"
 #include "kernel_common.hpp"
+#include "copy_l1_to_l0.hpp"
 
 using namespace KernelCommon;
 
