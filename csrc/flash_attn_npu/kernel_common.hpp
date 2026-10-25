@@ -9,6 +9,9 @@
 
 #include "catlass/catlass.hpp"
 
+#define CATLASS_NORMAL __aicore__
+#define CATLASS_INLINE __forceinline__ __aicore__
+
 namespace KernelCommon {
 constexpr uint32_t QK_READY_ID = 1;
 constexpr uint32_t SOFTMAX_READY_ID = 2;
@@ -58,9 +61,12 @@ struct FAIKernelParams {
 };
 
 // 获取 Q 的 N 维分块大小（N 维以 head 为单位分块，一个 block 内可包含多个 head）
-// 一个 task 内所有 KV 段共享 gl/gm/dm 行状态 buffer（MAX_ROW_NUM_SUB_CORE 行），
-// 因此要求所有段的行数之和不超过该上限。行状态按紧凑行布局（段间无 pad），
+// 一个 task 内所有 KV 段共享 gl/gm/dm 行状态 buffer，行状态按紧凑行布局（段间无 pad），
 // 这样 AIV 侧可以把所有段的行拼成一块，对 softmax/rescale 只调用一次。
+// 容量约束：AIV 侧把 task 的 rowNum 行按 rowNum/2 平分给两个 sub-core，每个子核只用
+// MAX_ROW_NUM_SUB_CORE 行行状态，所以 task 总行数上限是 2*MAX_ROW_NUM_SUB_CORE
+// （= Q_TILE_CEIL = 256）。这里若按 MAX_ROW_NUM_SUB_CORE(128) 卡，qS=64/128 的 tile
+// 会被腰斩（4→2、2→1），task 数翻倍，GQA 段内共享的 K/V 被重复搬运
 CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uint32_t nCap, uint32_t qHeads)
 {
     // Q 在 L1 中按 16 行对齐存放，整个 task 的 Q 占用 = segs * RoundUp<16>(qS) 行，
@@ -83,7 +89,7 @@ CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uin
         uint32_t rows = qSeqlen * segN;
         // 段间紧凑排列：行状态总行数 = 总 head 数 * qSeqlen，无对齐 pad
         uint32_t used = segs * rows;
-        if (used <= MAX_ROW_NUM_SUB_CORE) {
+        if (used <= MAX_ROW_NUM_SUB_CORE * NUM_2) { // 两个 sub-core 各拿 rowNum/2 行
             break;
         }
         if (qNBlockTile > groupSize) {
