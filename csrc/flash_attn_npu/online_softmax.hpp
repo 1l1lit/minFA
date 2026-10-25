@@ -503,6 +503,9 @@ public:
                     (nowRowIdx == 0), colNumRound, curStackTileMod);
             }
         }
+
+        pingPong ^= 1;
+        pingPongOffset = pingPong ? MAX_UB_ELEM_NUM : 0;
     }
 
 private:

@@ -111,8 +111,8 @@ std::vector<at::Tensor> mha_fwd_kvcache(
     }
     const auto sizes = q.sizes();
     const int batch_size = sizes[0];
-    int seqlen_q = sizes[1];
-    int num_heads = sizes[2];
+    const int seqlen_q = sizes[1];
+    const int num_heads = sizes[2];
     const int head_size = sizes[3];
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : kcache.size(0);
@@ -231,8 +231,8 @@ std::vector<at::Tensor> mha_fwd(
 
     const auto sizes = q.sizes();
     const int batch_size = sizes[0];
-    int seqlen_q = sizes[1];
-    int num_heads = sizes[2];
+    const int seqlen_q = sizes[1];
+    const int num_heads = sizes[2];
     const int head_size = sizes[3];
     const int seqlen_k = k.size(1);
     const int num_heads_k = k.size(2);
@@ -383,8 +383,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     }
 
     const auto sizes = q.sizes();
-    int total_q = sizes[0];
-    int num_heads = sizes[1];
+    const int total_q = sizes[0];
+    const int num_heads = sizes[1];
     const int head_size = sizes[2];
     const int batch_size = cu_seqlens_q.numel() - 1;
 

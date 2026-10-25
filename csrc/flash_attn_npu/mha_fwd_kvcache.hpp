@@ -124,10 +124,10 @@ public:
         groupSize = qHeads / kvHeads;
 
         // LSE 输出是 N 主序 (BSND -> BNS，TND -> NT)
-        if constexpr (INPUT_LAYOUT_ == InputLayoutT::TND) {
-            strideLse = gActualQseqlen.GetValue(batch); // totalQTokens
-        } else {
+        if constexpr (INPUT_LAYOUT_ == InputLayoutT::BSND) {
             strideLse = maxQSeqlen;
+        } else {
+            strideLse = gActualQseqlen.GetValue(batch); // totalQTokens
         }
 
         if ASCEND_IS_AIC {
@@ -153,6 +153,12 @@ public:
             coreIdx = AscendC::GetBlockIdx();
         } else {
             coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
+        }
+
+        if constexpr (INPUT_LAYOUT_ == InputLayoutT::BSND) {
+            taskInfo[0].qSeqlen = maxQSeqlen;
+            taskInfo[1].qSeqlen = maxQSeqlen;
+            CalcNormTailTask(maxQSeqlen);
         }
     }
 
@@ -192,42 +198,23 @@ public:
                         blockBOffset += maxNumBlocksPerBatch;
                     }
                     oBOffset += qSeqlen * strideO;
-                    if constexpr (INPUT_LAYOUT_ == InputLayoutT::TND) {
-                        lseBOffset += qSeqlen;
-                    } else {
+                    if constexpr (INPUT_LAYOUT_ == InputLayoutT::BSND) {
                         lseBOffset += qSeqlen * qHeads;
+                    } else {
+                        lseBOffset += qSeqlen;
                     }
                 }
 
-                qSeqlen = maxQSeqlen;
-                kvSeqlen = gActualKvseqlen.GetValue(curBatch);
-                if constexpr (INPUT_LAYOUT_ == InputLayoutT::TND) {
+                if constexpr (INPUT_LAYOUT_ == InputLayoutT::BSND) {
+                    kvSeqlen = gActualKvseqlen.GetValue(curBatch);
+                } else {
                     qSeqlen = gActualQseqlen.GetValue(curBatch + 1) - gActualQseqlen.GetValue(curBatch);
                     if constexpr (!PAGED_CACHE_FLAG_) {
                         kvSeqlen = gActualKvseqlen.GetValue(curBatch + 1) - gActualKvseqlen.GetValue(curBatch);
                     }
+                    CalcNormTailTask(qSeqlen);
                 }
 
-                normQSBlockTile = GetQSBlockTile();
-                normQSBlockNum = qSeqlen / normQSBlockTile;
-                if (normQSBlockNum > 0) {
-                    normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
-                    normQNGroupBlockNum = CeilDiv(groupSize, normQNBlockTile);
-                    normQNBlockNum = normQNGroupBlockNum * kvHeads;
-                }
-
-                tailQSBlockTile = qSeqlen % normQSBlockTile;
-                if (tailQSBlockTile > 0) {
-                    tailQSBlockNum = 1;
-                    tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize);
-                    tailQNGroupBlockNum = CeilDiv(groupSize, tailQNBlockTile);
-                    tailQNBlockNum = tailQNGroupBlockNum * kvHeads;
-                } else {
-                    tailQSBlockNum = 0;
-                }
-
-                normTaskNum = normQNBlockNum * normQSBlockNum;
-                tailTaskNum = tailQNBlockNum * tailQSBlockNum;
                 curTotalTaskNum += normTaskNum + tailTaskNum;
                 curBatch++;
             }
@@ -384,6 +371,30 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
         }
         AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
+    CATLASS_DEVICE void CalcNormTailTask(uint32_t qSeqlen)
+    {
+        normQSBlockTile = GetQSBlockTile();
+        normQSBlockNum = qSeqlen / normQSBlockTile;
+        if (normQSBlockNum > 0) {
+            normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
+            normQNGroupBlockNum = CeilDiv(groupSize, normQNBlockTile);
+            normQNBlockNum = normQNGroupBlockNum * kvHeads;
+        }
+
+        tailQSBlockTile = qSeqlen % normQSBlockTile;
+        if (tailQSBlockTile > 0) {
+            tailQSBlockNum = 1;
+            tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize);
+            tailQNGroupBlockNum = CeilDiv(groupSize, tailQNBlockTile);
+            tailQNBlockNum = tailQNGroupBlockNum * kvHeads;
+        } else {
+            tailQSBlockNum = 0;
+        }
+
+        normTaskNum = normQNBlockNum * normQSBlockNum;
+        tailTaskNum = tailQNBlockNum * tailQSBlockNum;
     }
 
     CATLASS_DEVICE void operator()(const FAIKernelParams& params, const Arch::Resource<ArchTag>& resource)
