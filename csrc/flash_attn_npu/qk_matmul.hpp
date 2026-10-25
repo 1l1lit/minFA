@@ -225,22 +225,19 @@ public:
                     // Q @ K = S
                     uint32_t mL0Align = RoundUp<NUM_16>(mL0Actual);
                     tileMmad(
-                        l0CTensor[l0CPingPong],  // l0CTensor
-                        l0ATensor[l0ABPingPong], // l0ATensor
-                        l0BTensor[l0ABPingPong], // l0BTensor
-                        mL0Align,                // m
-                        nActual,                 // n
-                        kL0Actual,               // k
-                        kL0Idx == 0);            // initC (bool)
+                        l0CTensor[l0CPingPong],                 // l0CTensor
+                        l0ATensor[l0ABPingPong],                // l0ATensor
+                        l0BTensor[l0ABPingPong],                // l0BTensor
+                        mL0Align,                               // m
+                        nActual,                                // n
+                        kL0Actual,                              // k
+                        (kL0Idx == 0),                          // initC
+                        (kL0Idx == kL0Loop - 1) ? 0b11 : 0b10); // unitFlag
                     AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(
                         l0ABPingPong); // 通知 M 计算完成，可以进行下一轮 L1 -> L0 搬运
 
                     l0ABPingPong ^= 1;
                 }
-
-                // 等待 M 计算完成，再进行 L0C -> GM 搬运
-                AscendC::SetFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
 
                 // S: L0C -> GM
                 MatrixCoord gmCTileCoord{mL0Idx * L0TileShape::M, nL1Idx * l1NDynamic};
@@ -250,7 +247,8 @@ public:
                     gC[layoutC.GetOffset(gmCTileCoord)], // dstTensor
                     l0CTensor[l0CPingPong],              // srcTensor
                     layoutCTile,                         // layoutDst
-                    layoutInL0C);                        // layoutSrc
+                    layoutInL0C,                         // layoutSrc
+                    0b11);                               // unitFlag
                 AscendC::SetFlag<AscendC::HardEvent::FIX_M>(
                     l0CPingPong); // 通知 L0C -> GM 搬运完成，可以进行下一轮 M 计算
 
