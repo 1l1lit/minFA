@@ -160,8 +160,6 @@ public:
 
             for (uint32_t mL1Idx = 0; mL1Idx < mL1Loop; mL1Idx++) {
                 uint32_t mL1Actual = (mL1Idx == mL1Loop - 1) ? (rowNum - mL1Idx * L1TileShape::M) : L1TileShape::M;
-                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(
-                    l0CPingPong); // 等待上一轮 L0C -> GM 搬运完成，再进行下一轮 M 计算
 
                 for (uint32_t kL1Idx = 0; kL1Idx < kL1Loop; kL1Idx++) {
                     uint32_t kL1Actual = (kL1Idx == kL1Loop - 1) ? (stackSeqTile - kL1Idx * l1KDynamic) : l1KDynamic;
@@ -213,7 +211,8 @@ public:
                         uint32_t mL0Align = RoundUp<NUM_16>(mL1Actual);
                         tileMmad(
                             l0CTensor[l0CPingPong], l0ATensor[l0ABPingPong], l0BTensor[l0ABPingPong], mL0Align,
-                            nL1Actual, kL0Actual, (kL1Idx == 0) && (kL0Idx == 0));
+                            nL1Actual, kL0Actual, (kL1Idx == 0) && (kL0Idx == 0),
+                            ((kL1Idx == kL1Loop - 1) && (kL0Idx == kL0Loop - 1)) ? 0b11 : 0b10);
                         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(
                             l0ABPingPong); // 通知 M 计算完成，可以进行下一轮 L1 -> L0 搬运
 
@@ -223,17 +222,12 @@ public:
                     l1APingPong ^= 1;
                 }
 
-                // 等待 M 计算完成，再进行 L0C -> GM 搬运
-                AscendC::SetFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
-
                 // OTmp: L0C -> GM
                 MatrixCoord gmCTileCoord{mL1Idx * L0TileShape::M, L0TileShape::N * nL1Idx};
                 LayoutC layoutCTile = layoutC.GetTileLayout(MakeCoord(mL1Actual, nL1Actual));
                 auto layoutInL0C = LayoutCInL0::MakeLayoutInL0C(MakeCoord(mL1Actual, nL1Actual));
-                copyL0CToGm(gC[layoutC.GetOffset(gmCTileCoord)], l0CTensor[l0CPingPong], layoutCTile, layoutInL0C);
-                AscendC::SetFlag<AscendC::HardEvent::FIX_M>(
-                    l0CPingPong); // 通知 L0C -> GM 搬运完成，可以进行下一轮 M 计算
+                copyL0CToGm(
+                    gC[layoutC.GetOffset(gmCTileCoord)], l0CTensor[l0CPingPong], layoutCTile, layoutInL0C, 0b11);
 
                 l0CPingPong ^= 1;
             }

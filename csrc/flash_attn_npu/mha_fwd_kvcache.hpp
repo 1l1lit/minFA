@@ -101,12 +101,11 @@ public:
         if ASCEND_IS_AIC {
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
-            AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
-            AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID1);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID3);
+            AscendC::SetMMRowMajor();
         } else {
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
@@ -356,8 +355,6 @@ public:
         if ASCEND_IS_AIC {
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
-            AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID2);
