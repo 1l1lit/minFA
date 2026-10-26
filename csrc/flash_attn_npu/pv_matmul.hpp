@@ -162,8 +162,6 @@ public:
 
             for (uint32_t mL1Idx = 0; mL1Idx < mL1Loop; mL1Idx++) {
                 uint32_t mL1Actual = (mL1Idx == mL1Loop - 1) ? (rowNum - mL1Idx * L1TileShape::M) : L1TileShape::M;
-                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(
-                    l0CPingPong); // 等待上一轮 L0C -> GM 搬运完成，再进行下一轮 M 计算
 
                 for (uint32_t kL1Idx = 0; kL1Idx < kL1Loop; kL1Idx++) {
                     uint32_t kL1Actual = (kL1Idx == kL1Loop - 1) ? (stackSeqTile - kL1Idx * l1KDynamic) : l1KDynamic;
@@ -232,8 +230,6 @@ public:
                 auto layoutInL0C = LayoutCInL0::MakeLayoutInL0C(MakeCoord(mL1Actual, nL1Actual));
                 copyL0CToGm(
                     gC[layoutC.GetOffset(gmCTileCoord)], l0CTensor[l0CPingPong], layoutCTile, layoutInL0C, 0b11);
-                AscendC::SetFlag<AscendC::HardEvent::FIX_M>(
-                    l0CPingPong); // 通知 L0C -> GM 搬运完成，可以进行下一轮 M 计算
 
                 l0CPingPong ^= 1;
             }

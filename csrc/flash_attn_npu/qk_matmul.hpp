@@ -187,8 +187,6 @@ public:
 
             for (uint32_t mL0Idx = 0; mL0Idx < mL0Loop; mL0Idx++) {
                 uint32_t mL0Actual = (mL0Idx == mL0Loop - 1) ? (rowNum - mL0Idx * L0TileShape::M) : L0TileShape::M;
-                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(
-                    l0CPingPong); // 等待上一轮 L0C -> GM 搬运完成，再进行 M 计算
 
                 for (uint32_t kL0Idx = 0; kL0Idx < kL0Loop; kL0Idx++) {
                     uint32_t kL0Actual = (kL0Idx == kL0Loop - 1) ? (embed - kL0Idx * L0TileShape::K) : L0TileShape::K;
@@ -254,8 +252,6 @@ public:
                     layoutCTile,                         // layoutDst
                     layoutInL0C,                         // layoutSrc
                     0b11);                               // unitFlag
-                AscendC::SetFlag<AscendC::HardEvent::FIX_M>(
-                    l0CPingPong); // 通知 L0C -> GM 搬运完成，可以进行下一轮 M 计算
 
                 l0CPingPong ^= 1;
             }
