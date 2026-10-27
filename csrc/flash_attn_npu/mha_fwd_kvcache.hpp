@@ -451,6 +451,21 @@ public:
 
         normTaskNum = normQNBlockNum * normQSBlockNum;
         tailTaskNum = tailQNBlockNum * tailQSBlockNum;
+
+        // TODO: 寻找一个更好的启发式任务分配决策
+        // MHA（groupSize==1）tail 的 head 合并需要按"单 batch 的 task 数"决策：
+        // MHA 每段只有 1 个 head，tail 把多个 head 塞进一个 task 时该 task 行数可达 256、
+        // KV 又比 norm 段长，是任务量最大的 task。当单 batch 的 task 数只够铺满一轮
+        // （<= coreNum + 2，例如 S=288~336 时 T=18/20/22）时，这些重 tail task 会长期
+        // 落在同几个 core 上（实测 B512/S320：7432us）；把 tail tile 压到 2 个 head
+        // 后 task 数增加、负载开始轮转（同条件 4311us）。
+        if constexpr (INPUT_LAYOUT_ == InputLayoutT::BSND) {
+            if (groupSize == 1 && tailTaskNum > 0 && normTaskNum + tailTaskNum <= coreNum + NUM_2) {
+                tailQNBlockTile = Min(tailQNBlockTile, NUM_2);
+                tailQNBlockNum = CeilDiv(qHeads, tailQNBlockTile);
+                tailTaskNum = tailQNBlockNum * tailQSBlockNum;
+            }
+        }
     }
 
     CATLASS_DEVICE void operator()(const FAIKernelParams& params, const Arch::Resource<ArchTag>& resource)

@@ -74,6 +74,8 @@ CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uin
     uint32_t qSAlign = RoundUp<NUM_16>(qSeqlen);
     uint32_t qNBlockTile = Min(nCap, Q_TILE_CEIL / qSAlign); // L1 Q 空间 + head 数上限
     qNBlockTile = Max(qNBlockTile, 1u);
+    // MHA 的 tail 拆分策略（是否把 tail tile 压到 2 个 head）依赖单 batch 的
+    // task 总数，在 CalcNormTailTask 里统一决策，这里只返回 fuse 后的 tile。
     // 只覆盖完整的 KV 段：tile >= groupSize 时按 groupSize 对齐（段数 > 1），
     // 否则取 groupSize 的因子（段数 = 1，head 起点仍在段边界）
     if (qNBlockTile >= groupSize) {
