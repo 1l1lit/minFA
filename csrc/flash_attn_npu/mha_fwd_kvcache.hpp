@@ -248,16 +248,30 @@ public:
                     tailTask ? (qSeqlen - tailQSBlockTile) : ((curTaskIdx / normQNBlockNum) * normQSBlockTile);
                 uint32_t qNBlockIdx = tailTask ? (curTaskIdx - normTaskNum) : (curTaskIdx % normQNBlockNum);
 
-                qNHeadStart = qNBlockIdx * qNBlockTile;              // 本 task 覆盖的 head 起点（绝对下标）
+                if (qNBlockTile >= groupSize) {
+                    // 整段对齐：tile 为 groupSize 的整数倍，一个 task 覆盖整数组
+                    qNHeadStart = qNBlockIdx * qNBlockTile;              // 本 task 覆盖的 head 起点（绝对下标）
+                    qNBlockSize = Min(qNBlockTile, qHeads - qNHeadStart); // 本 task 覆盖的 head 数
+                } else {
+                    // 组内切片：每个 KV 组切成 numSub = CeilDiv(groupSize, tile) 片，各片 head 数
+                    // 取 CeilDiv(groupSize, numSub)（<= tile）并尽量均匀——groupSize=3、tile=2 时
+                    // 每组是 2+1（而不是把 tile 压到 1 变成 1+1+1）。task 仍不跨组，故一个 task
+                    // 内的段划分依旧是一次算好的常量。
+                    uint32_t numSub = tailTask ? tailQNGroupBlockNum : normQNGroupBlockNum;
+                    uint32_t headStep = tailTask ? tailQNHeadStep : normQNHeadStep;
+                    uint32_t kvIdx = qNBlockIdx / numSub;
+                    uint32_t subIdx = qNBlockIdx - kvIdx * numSub;
+                    qNHeadStart = kvIdx * groupSize + subIdx * headStep;
+                    qNBlockSize = Min(headStep, groupSize - subIdx * headStep);
+                }
                 qSBlockSize = tailTask ? tailQSBlockTile : normQSBlockTile;
-                qNBlockSize = Min(qNBlockTile, qHeads - qNHeadStart); // 本 task 覆盖的 head 数
                 rowNum = qSBlockSize * qNBlockSize;                   // 多个 head 的 Q 行拼成连续的 rowNum 行
                 sRowPad = 0;                                          // 段内整块 flat 处理，不再需要 per-head 行 pad
                 headInGroup = qNHeadStart % groupSize;
                 kvHeadBase = qNHeadStart / groupSize;
 
-                // 统一段划分：GetQNBlockTile 保证 head 起点落在 KV 段边界（tile 为 groupSize
-                // 的倍数或其因子），因此一个 task 内各段 head 数/行数/各 buffer 步长都是常量。
+                // 统一段划分：上面两条路径保证 task 不跨 KV 组（整段对齐 / 组内切片），
+                // 因此一个 task 内各段 head 数/行数/各 buffer 步长都是常量。
                 // 行状态按紧凑行布局：段 s 的行状态紧接段 s-1，AIV 侧可把全部段的行当成一块处理。
                 segN = Min(qNBlockSize, groupSize);             // 每段 head 数
                 segNum = CeilDiv(qNBlockSize, segN);            // 段数
@@ -429,22 +443,39 @@ public:
         AscendC::PipeBarrier<PIPE_ALL>();
     }
 
+    // 由 N 方向 tile 推导任务划分（与 RunMainLoop 里的 head 寻址一一对应）：
+    //  tile >= groupSize：整段对齐，task 数 = CeilDiv(qHeads, tile)，numSub/headStep 不使用
+    //  tile <  groupSize：组内切片，每个 KV 组切 numSub = CeilDiv(groupSize, tile) 片，
+    //                     每片 headStep = CeilDiv(groupSize, numSub) 个 head
+    //                     （headStep <= tile 恒成立，且各片尽量均匀：groupSize=3、tile=2 → 2+1）
+    CATLASS_INLINE void CalcQNBlockNum(
+        uint32_t qNBlockTile, uint32_t& numSub, uint32_t& headStep, uint32_t& qNBlockNum)
+    {
+        if (qNBlockTile >= groupSize) {
+            numSub = 1;
+            headStep = groupSize;
+            qNBlockNum = CeilDiv(qHeads, qNBlockTile);
+        } else {
+            numSub = CeilDiv(groupSize, qNBlockTile);
+            headStep = CeilDiv(groupSize, numSub);
+            qNBlockNum = kvHeads * numSub;
+        }
+    }
+
     CATLASS_DEVICE void CalcNormTailTask(uint32_t qSeqlen)
     {
         normQSBlockTile = GetQSBlockTile();
         normQSBlockNum = qSeqlen / normQSBlockTile;
         if (normQSBlockNum > 0) {
             normQNBlockTile = GetQNBlockTile(qSeqlen, groupSize, qNCap, qHeads);
-            normQNGroupBlockNum = 1;
-            normQNBlockNum = CeilDiv(qHeads, normQNBlockTile);
+            CalcQNBlockNum(normQNBlockTile, normQNGroupBlockNum, normQNHeadStep, normQNBlockNum);
         }
 
         tailQSBlockTile = qSeqlen % normQSBlockTile;
         if (tailQSBlockTile > 0) {
             tailQSBlockNum = 1;
             tailQNBlockTile = GetQNBlockTile(tailQSBlockTile, groupSize, qNCap, qHeads);
-            tailQNGroupBlockNum = 1;
-            tailQNBlockNum = CeilDiv(qHeads, tailQNBlockTile);
+            CalcQNBlockNum(tailQNBlockTile, tailQNGroupBlockNum, tailQNHeadStep, tailQNBlockNum);
         } else {
             tailQSBlockNum = 0;
         }
@@ -532,8 +563,12 @@ private:
     uint32_t preTotalTaskNum = 0;
     uint32_t curTotalTaskNum = 0;
     uint32_t curBatch = 0;
-    uint32_t normQSBlockTile, normQSBlockNum, normQNBlockTile, normQNGroupBlockNum, normQNBlockNum, normTaskNum;
-    uint32_t tailQSBlockTile, tailQSBlockNum, tailQNBlockTile, tailQNGroupBlockNum, tailQNBlockNum, tailTaskNum;
+    // QNGroupBlockNum：每组内切出的 head 子块数（tile < groupSize 时 > 1，否则为 1）
+    // QNHeadStep      ：组内每片的 head 数（tile >= groupSize 时不使用）
+    uint32_t normQSBlockTile, normQSBlockNum, normQNBlockTile, normQNGroupBlockNum, normQNHeadStep, normQNBlockNum,
+        normTaskNum;
+    uint32_t tailQSBlockTile, tailQSBlockNum, tailQNBlockTile, tailQNGroupBlockNum, tailQNHeadStep, tailQNBlockNum,
+        tailTaskNum;
 
     struct TaskInfo {
         uint32_t kvSIdx, kvSLoop;

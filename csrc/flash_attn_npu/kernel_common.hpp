@@ -88,14 +88,13 @@ CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uin
     qNBlockTile = Max(qNBlockTile, 1u);
     // MHA 的 tail 拆分策略（是否把 tail tile 压到 2 个 head）依赖单 batch 的
     // task 总数，在 CalcNormTailTask 里统一决策，这里只返回 fuse 后的 tile。
-    // 只覆盖完整的 KV 段：tile >= groupSize 时按 groupSize 对齐（段数 > 1），
-    // 否则取 groupSize 的因子（段数 = 1，head 起点仍在段边界）
+    // tile >= groupSize：按 groupSize 对齐（一个 task 覆盖整数组，段数 = tile/groupSize）
+    // tile <  groupSize：不再强制取 groupSize 的因子——允许"组内均分"（由 task 解码处
+    //   按"第几个组内切片"寻址，task 不跨组），例如 groupSize=3、tile=2 → 每组 2+1。
+    //   若仍退回取因子，groupSize 为质数时 tile 会被压到 1，task 数翻倍、每个 head
+    //   都要单独读一遍 K/V。
     if (qNBlockTile >= groupSize) {
         qNBlockTile = (qNBlockTile / groupSize) * groupSize;
-    } else {
-        while (qNBlockTile > 1 && (groupSize % qNBlockTile) != 0) {
-            --qNBlockTile;
-        }
     }
     while (qNBlockTile > 1) {
         uint32_t segN = Min(qNBlockTile, groupSize);
@@ -109,9 +108,7 @@ CATLASS_INLINE uint32_t GetQNBlockTile(uint32_t qSeqlen, uint32_t groupSize, uin
         if (qNBlockTile > groupSize) {
             qNBlockTile -= groupSize; // 保持段对齐
         } else {
-            do {
-                --qNBlockTile;
-            } while (qNBlockTile > 1 && (groupSize % qNBlockTile) != 0);
+            --qNBlockTile; // 组内切片：任意 tile 都合法，逐 1 收敛即可
         }
     }
     // head 数在 task 间均分：task 按 taskIdx += coreNum 轮转，coreNum 为偶数时同一 core
