@@ -60,6 +60,18 @@ struct FAIKernelParams {
     GM_ADDR tiling;
 };
 
+// 最大公约数：用于判断 task 数 T 与 coreNum 的轮转关系
+// （task 按 taskIdx += coreNum 轮转，同一 core 每 coreNum/gcd(T, coreNum) 个 task 回到同类）
+CATLASS_INLINE uint32_t GcdNum(uint32_t a, uint32_t b)
+{
+    while (b != 0) {
+        uint32_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
 // 获取 Q 的 N 维分块大小（N 维以 head 为单位分块，一个 block 内可包含多个 head）
 // 一个 task 内所有 KV 段共享 gl/gm/dm 行状态 buffer，行状态按紧凑行布局（段间无 pad），
 // 这样 AIV 侧可以把所有段的行拼成一块，对 softmax/rescale 只调用一次。

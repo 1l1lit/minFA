@@ -455,15 +455,25 @@ public:
         // TODO: 寻找一个更好的启发式任务分配决策
         // MHA（groupSize==1）tail 的 head 合并需要按"单 batch 的 task 数"决策：
         // MHA 每段只有 1 个 head，tail 把多个 head 塞进一个 task 时该 task 行数可达 256、
-        // KV 又比 norm 段长，是任务量最大的 task。当单 batch 的 task 数只够铺满一轮
-        // （<= coreNum + 2，例如 S=288~336 时 T=18/20/22）时，这些重 tail task 会长期
-        // 落在同几个 core 上（实测 B512/S320：7432us）；把 tail tile 压到 2 个 head
-        // 后 task 数增加、负载开始轮转（同条件 4311us）。
+        // KV 又比 norm 段长，是任务量最大的 task。taskIdx 按 += coreNum 轮转，单 batch 的
+        // task 数 T 决定重 task 落核的规律：轮转周期 = coreNum / gcd(T, coreNum)，
+        // gcd(T, coreNum) 越大，同一 core 越会被长期钉在同一类 task 上
+        // （实测 B512/n16/S320：T=20、gcd=20，重 tail task 固定落在同几个 core，7.4ms）。
+        // 把 tail tile 压到 2 个 head 后 T 变大、gcd 变小、轮转更充分（同条件 4.6ms）。
+        // 判据只用"压缩后 gcd 是否真的变小"，不要再叠 T 的上界窗口：
         if constexpr (INPUT_LAYOUT_ == InputLayoutT::BSND) {
-            if (groupSize == 1 && tailTaskNum > 0 && normTaskNum + tailTaskNum <= coreNum + NUM_2) {
-                tailQNBlockTile = Min(tailQNBlockTile, NUM_2);
-                tailQNBlockNum = CeilDiv(qHeads, tailQNBlockTile);
-                tailTaskNum = tailQNBlockNum * tailQSBlockNum;
+            uint32_t curTaskNum = normTaskNum + tailTaskNum;
+            if (groupSize == 1 && tailTaskNum > 0) {
+                uint32_t newTile = Min(tailQNBlockTile, NUM_2);
+                if (newTile < tailQNBlockTile) {
+                    uint32_t newTailTaskNum = CeilDiv(qHeads, newTile) * tailQSBlockNum;
+                    uint32_t newTaskNum = normTaskNum + newTailTaskNum;
+                    if (GcdNum(newTaskNum, coreNum) < GcdNum(curTaskNum, coreNum)) {
+                        tailQNBlockTile = newTile;
+                        tailQNBlockNum = CeilDiv(qHeads, tailQNBlockTile);
+                        tailTaskNum = newTailTaskNum;
+                    }
+                }
             }
         }
     }
