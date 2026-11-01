@@ -141,6 +141,10 @@ public:
             RowMaxFull(lm[rowOffset], ls[pingPongOffset], rowNum);
         } else if (colNum > FLT_PER_REPEAT && colNum % FLT_PER_REPEAT == 0) {
             RowMaxNorm(lm[rowOffset], ls[pingPongOffset], rowNum, colNum);
+        } else if (colNumRound > FLT_PER_REPEAT) {
+            // 尾块：UB 行宽已按 64 对齐、[colNum, colNumRound) 已被 PadNegInfCols 置 -3e38，
+            // 因此仍可整块连续归约（不必走串行的 RowMaxTail）。
+            RowMaxNorm(lm[rowOffset], ls[pingPongOffset], rowNum, colNumRound);
         } else {
             RowMaxTail(lm[rowOffset], ls[pingPongOffset], rowNum, colNum, colNumRound);
         }
@@ -248,6 +252,9 @@ public:
             RowSumFull(ll[rowOffset], ls[pingPongOffset], rowNum);
         } else if (colNum > FLT_PER_REPEAT && colNum % FLT_PER_REPEAT == 0) {
             RowSumNorm(ll[rowOffset], ls[pingPongOffset], rowNum, colNum);
+        } else if (colNumRound > FLT_PER_REPEAT) {
+            // 同 CalcLocalRowMax：padding 列在 CalcExp 里 exp(-3e38-...) == 0（sum 的幺元）。
+            RowSumNorm(ll[rowOffset], ls[pingPongOffset], rowNum, colNumRound);
         } else {
             RowSumTail(ll[rowOffset], ls[pingPongOffset], rowNum, colNum, colNumRound);
         }
@@ -319,6 +326,29 @@ public:
                 ResetMask();
             }
         }
+        PipeBarrier<PIPE_V>();
+    }
+
+    // 把每行 [colNum, colNumRound) 的 padding 列覆盖成 -3e38（max 的幺元；后续 CalcExp 的 Exp
+    // 全网覆盖后自然变成 0，即 sum 的幺元）。这样 UB 每行宽度恒为 64 的整数倍，
+    // RowMaxNorm/RowSumNorm 的“连续 8 个 datablock 一组”归约前提成立。
+    CATLASS_DEVICE void PadNegInfCols(uint32_t rowNum, uint32_t colNum, uint32_t colNumRound)
+    {
+        if (colNumRound <= colNum) {
+            return;
+        }
+        // VEC 指令要求 UB 起始地址 32B(8 float) 对齐：从 colNum 所在 datablock 的首列起写，
+        // 用元素掩码跳过该 block 内的真实列 [colNum, padStart+8)，只写其后的 padding 列。
+        uint32_t padStart = RoundDown<FLT_PER_DATABLOCK>(colNum);
+        uint32_t skip = colNum - padStart;      // 0 ~ 7
+        uint32_t len = colNumRound - padStart;  // 8 ~ 64
+        uint64_t mask = (len >= FLT_PER_REPEAT) ? MASK_ALL : ((MASK_ONE << len) - 1);
+        mask &= ~((MASK_ONE << skip) - 1);
+
+        AscendC::SetVectorMask<float>(0, mask);
+        Duplicate<float, false>(
+            ls[pingPongOffset][padStart], -3e38f, MASK_NUL, rowNum, 1, colNumRound / FLT_PER_DATABLOCK);
+        ResetMask();
         PipeBarrier<PIPE_V>();
     }
 
@@ -404,7 +434,7 @@ public:
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t colNum = actualBlockShape.n();
-        uint32_t colNumRound = RoundUp<NUM_32>(colNum);
+        uint32_t colNumRound = RoundUp<FLT_PER_REPEAT>(colNum);
         uint32_t colStride = layoutInput.stride(0);
 
         uint32_t core1 = GetSubBlockIdx();
@@ -485,6 +515,7 @@ public:
 
                 WaitFlag<HardEvent::MTE2_V>(pingPong);
                 ScaleS(rowNumNowLoop, colNumRound);
+                PadNegInfCols(rowNumNowLoop, colNum, colNumRound);
 
                 if constexpr (MASK_MODE_ == MaskModeT::MASK_CAUSAL) {
                     if (applyMask) {
