@@ -277,7 +277,11 @@ public:
                 segNum = CeilDiv(qNBlockSize, segN);            // 段数
                 segRows = qSBlockSize * segN;                   // 每段 Q 行数
                 segRowStride = segRows;                         // gl/gm/dm 行状态步长（紧凑，无 pad）
-                segL1Stride = RoundUp<NUM_16>(segRows) * embed; // L1 中 Q 步长（16 行对齐）
+                // L1 中 Q 按 zN 存放：行按 16 对齐、列（D）也按 16 对齐（zN 的 C0 块），
+                // 段间步长必须用 embedRound（16 元素对齐）而不是 dense 的 embed。否则 embed
+                // 不是 16 的整数倍时（如 D=8/D=20），下一段的 Q 会压到本段尾部行上，表现为
+                // 每个 task 里第二段起点之前的若干行算错（S/P、LSE、O 同时错）。
+                segL1Stride = RoundUp<NUM_16>(segRows) * embedRound; // L1 中 Q 步长（16 行 x 16 列对齐）
                 segSStride = segRows * MAX_KV_STACK_LEN;        // S/P workspace 步长
                 segOStride = segRows * embedRound;              // O_tmp workspace 步长
 
